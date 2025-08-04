@@ -1,0 +1,146 @@
+<?xml version="1.0"?>
+
+<data>
+    <aircraft>
+        <model>Volanti</model>
+        <model_version>AC_3</model_version>
+        <model_description>
+            <!-- Flight Controller: -->
+            CubeOrangePlus,
+            <!-- CAN Architecture: -->
+            Diagonal CAN Architecture,
+            <!-- CAN Components: -->
+            Crystal CPNs,
+            CAN GPS,
+            CAN Airspeed
+        </model_description>
+        <status>active</status>
+        <configuration_version>2</configuration_version>
+    </aircraft>
+    <flight_controller>
+        <board_name>CubeOrangePlus-CX</board_name>
+        <firmware_commit>cx_pilot_commit_id</firmware_commit>
+        <firmware_path>arduplane.apj</firmware_path>
+        <defaults_file>Volanti.parm</defaults_file>
+    </flight_controller>
+    <cpn_list>
+        <cpn id="11">
+            <bus>1</bus>
+            <board_name>Volanti-M1_CarbonixF405</board_name>
+            <firmware_commit>cx_pilot_commit_id</firmware_commit>
+            <firmware_path>AP_Periph.bin</firmware_path>
+        </cpn>
+        <cpn id="12">
+            <bus>1</bus>
+            <board_name>Volanti-M2_CarbonixF405</board_name>
+            <firmware_commit>cx_pilot_commit_id</firmware_commit>
+            <firmware_path>AP_Periph.bin</firmware_path>
+        </cpn>
+        <cpn id="15">
+            <bus>1</bus>
+            <board_name>Volanti-M5_CarbonixF405</board_name>
+            <firmware_commit>cx_pilot_commit_id</firmware_commit>
+            <firmware_path>AP_Periph.bin</firmware_path>
+        </cpn>
+        <cpn id="16">
+            <bus>1</bus>
+            <board_name>Volanti-RWing_CarbonixF405</board_name>
+            <firmware_commit>cx_pilot_commit_id</firmware_commit>
+            <firmware_path>AP_Periph.bin</firmware_path>
+        </cpn>
+        <cpn id="17">
+            <bus>1</bus>
+            <board_name>Volanti-LTail_CarbonixF405</board_name>
+            <firmware_commit>cx_pilot_commit_id</firmware_commit>
+            <firmware_path>AP_Periph.bin</firmware_path>
+        </cpn>
+        <cpn id="19">
+            <bus>1</bus>
+            <board_name>gps_org.ardupilot.HolybroG4_GPS</board_name>
+            <firmware_commit>6e519848</firmware_commit>
+        </cpn>
+        <cpn id="29">
+            <bus>1</bus>
+            <board_name>gps_org.ardupilot.HolybroG4_GPS</board_name>
+            <firmware_commit>6e519848</firmware_commit>
+        </cpn>
+        <cpn id="101">
+            <bus>1</bus>
+            <board_name>arspd_org.ardupilot.f405_MatekGPS</board_name>
+            <firmware_commit>158c7c49</firmware_commit>
+        </cpn>
+        <cpn id="23">
+            <bus>2</bus>
+            <board_name>Volanti-M3_CarbonixF405</board_name>
+            <firmware_commit>cx_pilot_commit_id</firmware_commit>
+            <firmware_path>AP_Periph.bin</firmware_path>
+        </cpn>
+        <cpn id="24">
+            <bus>2</bus>
+            <board_name>Volanti-M4_CarbonixF405</board_name>
+            <firmware_commit>cx_pilot_commit_id</firmware_commit>
+            <firmware_path>AP_Periph.bin</firmware_path>
+        </cpn>
+        <cpn id="26">
+            <bus>2</bus>
+            <board_name>Volanti-LWing_CarbonixF405</board_name>
+            <firmware_commit>cx_pilot_commit_id</firmware_commit>
+            <firmware_path>AP_Periph.bin</firmware_path>
+        </cpn>
+        <cpn id="27">
+            <bus>2</bus>
+            <board_name>Volanti-RTail_CarbonixF405</board_name>
+            <firmware_commit>cx_pilot_commit_id</firmware_commit>
+            <firmware_path>AP_Periph.bin</firmware_path>
+        </cpn>
+        <cpn id="102">
+            <bus>2</bus>
+            <board_name>arspd_org.ardupilot.f405_MatekGPS</board_name>
+            <firmware_commit>158c7c49</firmware_commit>
+        </cpn>
+    </cpn_list>
+    <esc_list>
+    </esc_list>
+    <airspeed_list>
+    </airspeed_list>
+    <battery_list>
+    </battery_list>
+    <barometer_list>
+    </barometer_list>
+    <lidar_list>
+    </lidar_list>
+    <lua_script_list>
+        <lua_script>
+            <source_path>libraries/AP_HAL_ChibiOS/hwdef/CarbonixCommon/scripts/cx_built_in_test.lua</source_path>
+            <destination_path>cx_built_in_test.lua</destination_path>
+        </lua_script>
+        <lua_script>
+            <source_path>libraries/AP_HAL_ChibiOS/hwdef/CarbonixCommon/scripts/cx_led_driver.lua</source_path>
+            <destination_path>cx_led_driver.lua</destination_path>
+        </lua_script>
+        <lua_script>
+            <source_path>libraries/AP_HAL_ChibiOS/hwdef/CarbonixCommon/scripts/cx_vtol_info.lua</source_path>
+            <destination_path>cx_vtol_info.lua</destination_path>
+        </lua_script>
+        <lua_script>
+            <source_path>libraries/AP_HAL_ChibiOS/hwdef/CarbonixCommon/scripts/modules/bit_esc.lua</source_path>
+            <destination_path>modules/bit_esc.lua</destination_path>
+        </lua_script>
+        <lua_script>
+            <source_path>libraries/AP_HAL_ChibiOS/hwdef/CarbonixCommon/scripts/modules/bit_gps.lua</source_path>
+            <destination_path>modules/bit_gps.lua</destination_path>
+        </lua_script>
+        <lua_script>
+            <source_path>libraries/AP_HAL_ChibiOS/hwdef/CarbonixCommon/scripts/modules/bit_engine.lua</source_path>
+            <destination_path>modules/bit_engine.lua</destination_path>
+        </lua_script>
+        <lua_script>
+            <source_path>libraries/AP_HAL_ChibiOS/hwdef/CarbonixCommon/scripts/modules/msg.lua</source_path>
+            <destination_path>modules/msg.lua</destination_path>
+        </lua_script>
+        <lua_script>
+            <source_path>libraries/AP_HAL_ChibiOS/hwdef/CarbonixCommon/scripts/aircraft/volanti.lua</source_path>
+            <destination_path>modules/aircraft.lua</destination_path>
+        </lua_script>
+    </lua_script_list>
+</data>
