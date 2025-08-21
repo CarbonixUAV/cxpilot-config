@@ -11,13 +11,19 @@ To modify the board name, the input binary needs to have been compiled with a
 known string that is guaranteed to show up only once in the binary. The new
 name is padded with null bytes to match the length of the old name and then
 replaces the old name in the binary.
-
-AP_FLAKE8_CLEAN
 """
+import sys
 import struct
 import argparse
-from uploader import crc32
-from apj_tool import embedded_defaults
+
+from paths import CXPILOT_CORE_ROOT
+
+# Add CXPILOT_CORE_ROOT/Tools/scripts to the pythonpath
+# (this is the only way to avoid code duplication/drift for stock ArduPilot's
+# crc32 and embedded_defaults)
+sys.path.insert(0, str(CXPILOT_CORE_ROOT / "Tools" / "scripts"))
+from uploader import crc32  # noqa: E402
+from apj_tool import embedded_defaults  # noqa: E402
 
 
 def replace_board_name(image, old_name, new_name):
@@ -41,13 +47,13 @@ def replace_board_name(image, old_name, new_name):
     offset = image.find(old_bytes)
     if offset == -1:
         raise LookupError(f"'{old_name}' not found in image")
-    if image.find(old_bytes, offset+1) != -1:
+    if image.find(old_bytes, offset + 1) != -1:
         raise AssertionError(f"'{old_name}' found multiple times in image")
     if len(new_bytes) > len(old_bytes):
         raise ValueError(f"New board name '{new_name}' is too long")
     # Pad the new name with null bytes to match the length of the old name
     new_bytes += b'\0' * (len(old_bytes) - len(new_bytes))
-    image = image[:offset] + new_bytes + image[offset+len(old_bytes):]
+    image = image[:offset] + new_bytes + image[offset + len(old_bytes):]
     return image
 
 
@@ -74,15 +80,15 @@ def fix_app_descriptor(img):
     offset += 8
     desc_len = 16
     # Get the existing app descriptor
-    crc1, crc2, img_len, githash = struct.unpack('<IIII', img[offset:offset+desc_len])
+    crc1, crc2, img_len, githash = struct.unpack('<IIII', img[offset:offset + desc_len])
     if img_len != len(img):
         raise AssertionError('Bad APP_DESCRIPTOR: image length mismatch')
     img1 = bytearray(img[:offset])
-    img2 = bytearray(img[offset+desc_len:])
+    img2 = bytearray(img[offset + desc_len:])
     crc1 = to_unsigned(crc32(img1))
     crc2 = to_unsigned(crc32(img2))
     desc = struct.pack('<IIII', crc1, crc2, len(img), githash)
-    img = img[:offset] + desc + img[offset+desc_len:]
+    img = img[:offset] + desc + img[offset + desc_len:]
     return img
 
 
