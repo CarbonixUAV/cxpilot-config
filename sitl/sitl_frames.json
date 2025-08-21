@@ -1,0 +1,38 @@
+{
+  "ottano-headless": {
+    "model": "quadplane:sitl/models/Ottano.json",
+    "defaults": "sitl/params/ottano-headless.parm",
+    "base_aircraft_config": "Ottano_AC_2",
+    "scripts": [
+      "sitl/scripts/sitl_engine.lua",
+      "sitl/scripts/sitl_escs.lua"
+    ]
+  },
+  "ottano-realflight": {
+    "model": "flightaxis",
+    "defaults": "sitl/params/ottano-realflight.parm",
+    "base_aircraft_config": "Ottano_AC_3",
+    "scripts": [
+      "sitl/scripts/sitl_engine.lua",
+      "sitl/scripts/sitl_escs.lua"
+    ],
+    "external": true
+  },
+  "volanti-headless": {
+    "model": "quadplane:sitl/models/Volanti.json",
+    "defaults": "sitl/params/volanti-headless.parm",
+    "base_aircraft_config": "Volanti_AC_3",
+    "scripts": [
+      "sitl/scripts/sitl_escs.lua"
+    ]
+  },
+  "volanti-realflight": {
+    "model": "flightaxis",
+    "defaults": "sitl/params/volanti-realflight.parm",
+    "base_aircraft_config": "Volanti_AC_3",
+    "scripts": [
+      "sitl/scripts/sitl_escs.lua"
+    ],
+    "external": true
+  }
+}
