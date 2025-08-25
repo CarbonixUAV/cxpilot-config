@@ -17,7 +17,6 @@ from typing import Iterable
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 
-import cx_apj_tool
 from paths import CXPILOT_ROOT, CXPILOT_CONFIG_ROOT, CXPILOT_CORE_ROOT
 
 AC_CONFIG_ROOT = CXPILOT_CONFIG_ROOT / "aircraft_configuration"
@@ -62,6 +61,7 @@ def generate_cpn_firmware(config: str, base_dir: Path, out_dir: Path) -> None:
         base_dir (str): Path to the directory containing periph base firmware files.
         out_dir (str): Output directory for the generated CPN firmware files.
     """
+    import cx_apj_tool
     if config not in _get_config_index():
         raise ValueError(f"Unknown configuration: {config}")
 
