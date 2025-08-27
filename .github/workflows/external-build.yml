@@ -1,0 +1,37 @@
+name: Request Build
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: none
+
+jobs:
+  send:
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Create app token for integration repo
+        uses: actions/create-github-app-token@v2
+        id: app
+        with:
+          app-id: ${{ secrets.CI_BOT_APP_ID }}
+          private-key: ${{ secrets.CI_BOT_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: cxpilot
+
+      - name: Dispatch build workflow
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ steps.app.outputs.token }}
+          script: |
+            const base = context.payload.pull_request.base.ref;
+            const feature = context.payload.pull_request.head.ref;
+            console.log(`Dispatching build on ${base} for feature branch ${feature}`);
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: 'cxpilot',
+              workflow_id: 'cxpilot-build.yml',
+              ref: base,
+              inputs: { feature_branch: feature }
+            });
