@@ -6,7 +6,7 @@ import os
 import json
 import shutil
 import functools
-from typing import Any
+from typing import Any, Optional
 from pathlib import Path
 
 import ac_config_tools
@@ -112,7 +112,7 @@ def write_defaults_file(frame_name: str, defaults_out: Path, strip: bool = False
     defaults_out.write_text("\n".join(processed_defaults) + "\n", encoding='utf-8')
 
 
-def get_model(frame_info: dict) -> tuple[str, Path | None]:
+def get_model(frame_info: dict) -> tuple[str, Optional[Path]]:
     """
     Get the -M argument to pass to the SITL command for this frame. This
     also handles adding the ip address for "flightaxis" models if needed.

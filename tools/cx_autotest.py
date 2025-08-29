@@ -6,7 +6,7 @@ import sys
 import shutil
 import argparse
 import functools
-from typing import Any
+from typing import Any, Optional
 from pathlib import Path
 from pymavlink import mavutil
 
@@ -449,7 +449,7 @@ STEPS = {
 }
 
 
-def _run_one(tester_cls: type[TestSuite], frame: str, subtest: str | None) -> tuple[bool, TestSuite]:
+def _run_one(tester_cls: type[TestSuite], frame: str, subtest: Optional[str]) -> tuple[bool, TestSuite]:
     tester = tester_cls(str(PLANE_BINARY), frame=frame)
     if subtest:
         tests = []

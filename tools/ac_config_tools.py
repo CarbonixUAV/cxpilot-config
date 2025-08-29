@@ -13,7 +13,7 @@ import fnmatch
 import functools
 import subprocess
 from pathlib import Path
-from typing import Iterable
+from typing import Optional, Iterable, Union
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 
@@ -119,7 +119,7 @@ def generate_cpn_firmware(config: str, base_dir: Path, out_dir: Path) -> None:
         output_file.save()
 
 
-def get_periph_bases(configs: Iterable[str] | None = None, allow_deprecated: bool = False) -> list[str]:
+def get_periph_bases(configs: Optional[Iterable[str]] = None, allow_deprecated: bool = False) -> list[str]:
     """
     Get all the unique periph firmware files that waf will need to build before
     the final CPN firmware files (with modified board names and defaults) can
@@ -259,7 +259,7 @@ def get_waf_board(base_name: str) -> str:
 
 
 @functools.lru_cache(maxsize=1)
-def _get_config_index() -> dict[str, dict[str, str | Path]]:
+def _get_config_index() -> dict[str, dict[str, Union[Path, str]]]:
     """
     Get a dictionary index of all aircraft configurations.
 
