@@ -2,7 +2,7 @@
 @include ./OttanoCommon.parm
 # Ottano Octo-specific parameters
 AIRSPEED_CRUISE,27
-AIRSPEED_MAX,36
+AIRSPEED_MAX,33
 AIRSPEED_MIN,25
 BATT4_ESC_MASK,150 # Left ESCs:2,3,5,8
 BATT5_ESC_MASK,105 # Right ESCs:1,4,6,7
