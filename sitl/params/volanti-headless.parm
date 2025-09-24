@@ -31,6 +31,7 @@ INS_ACCSCAL_Z,1.001
 INS_GYR_CAL,0 # taken from quadplane autotest parameters, just in case
 LOG_REPLAY,0 # causes random crashes on the Cygwin SITL
 NAVL1_PERIOD,14
+@delete NET_P* # don't create network serial ports by default in SITL
 @delete PTCH_RATE_*
 PTCH_RATE_FF,1.407055
 PTCH_RATE_I,0.2125
