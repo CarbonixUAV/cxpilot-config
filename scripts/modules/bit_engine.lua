@@ -94,11 +94,9 @@ function Engine:check_for_errors()
     elseif math.min(self.cht1, self.cht2) < self.CHT_MIN then
         msgs = self.name .. " cold"
     elseif math.abs(self.cht1 - self.cht2) > self.CHT_DEVIATION then
-        local cold_cylinder = (self.cht1 < self.cht2) and "1" or "2"
-        msgs = self.name .. " CHT" .. cold_cylinder .. " cold"
+        msgs = self.name .. " CHT difference"
     elseif math.abs(self.egt1 - self.egt2) > self.EGT_DEVIATION then
-        local cold_cylinder = (self.egt1 < self.egt2) and "1" or "2"
-        msgs = self.name .. " EGT" .. cold_cylinder .. " cold"
+        msgs = self.name .. " EGT difference"
     elseif (not arming:is_armed()) and (self.max_rpm < self.RUNUP_RPM_THRESHOLD) then
         msgs = self.name .. " needs runup to " .. self.RUNUP_RPM_THRESHOLD .. " RPM"
     end
