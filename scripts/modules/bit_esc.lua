@@ -77,6 +77,8 @@ end
 function ESC:esc_is_stopped(i)
     -- Clear the warm-up end time for this ESC
     self.esc_warmup_end_time[i] = nil
+    -- Reset the RPM error status, since the motor is stopped
+    self.srv_rpm_in_err_status[i] = false
 end
 
 function ESC:update()
