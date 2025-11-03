@@ -16,7 +16,7 @@ local Engine = {
     CHT_MAX = 280,
     CHT_DEVIATION = 50,
     EGT_MAX = 720,
-    EGT_DEVIATION = 50,
+    EGT_DEVIATION = 75,
 
     -- Threshold for the full throttle ground runup
     RUNUP_RPM_THRESHOLD = 6700,
