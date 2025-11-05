@@ -175,6 +175,10 @@
             <destination_path>ice-auto-warmup.lua</destination_path>
         </lua_script>
         <lua_script>
+            <source_path>scripts/engine/engine-out.lua</source_path>
+            <destination_path>engine-out.lua</destination_path>
+        </lua_script>
+        <lua_script>
             <source_path>scripts/modules/bit_esc.lua</source_path>
             <destination_path>modules/bit_esc.lua</destination_path>
         </lua_script>
@@ -193,6 +197,10 @@
         <lua_script>
             <source_path>scripts/aircraft/ottano.lua</source_path>
             <destination_path>modules/aircraft.lua</destination_path>
+        </lua_script>
+        <lua_script>
+            <source_path>scripts/modules/utilities.lua</source_path>
+            <destination_path>modules/utilities.lua</destination_path>
         </lua_script>
     </lua_script_list>
 </data>
