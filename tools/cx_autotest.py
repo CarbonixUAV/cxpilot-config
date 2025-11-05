@@ -486,6 +486,15 @@ def main():
     os.environ['BUILDLOGS'] = str(buildlogs_dir)
 
     if args.build:
+        # ROMFS_custom should never exist at this point. I sometimes use it
+        # temporarily in SITL to test specific things, but if it sticks around
+        # long term, it causes very subtle issues. If you are running an
+        # autotest you certainly don't want ROMFS_custom to exist.
+        romfs_custom = CXPILOT_CORE_ROOT / "ROMFS_custom"
+        if romfs_custom.exists():
+            raise RuntimeError(
+                "Delete the ROMFS_custom directory before running autotests."
+            )
         try:
             PLANE_BINARY.unlink(missing_ok=True)  # Path
         except Exception:
