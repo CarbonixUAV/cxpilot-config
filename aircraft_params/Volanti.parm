@@ -167,6 +167,7 @@ Q_P_VELZ_IMAX,4
 Q_P_VELZ_P,4.5
 Q_PILOT_ACCEL_Z,2
 Q_PLT_Y_RATE,12
+Q_RTL_ALT,45
 Q_TRANS_DECEL,0.8
 Q_TRANS_FAIL,30 # DISABLE_CHECKS: we want to allow 30 seconds for transition; ArduPilot max of 20 seconds is too short
 Q_TRANSITION_MS,2000
