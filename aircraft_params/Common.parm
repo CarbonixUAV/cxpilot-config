@@ -77,6 +77,7 @@ Q_TRAN_PIT_MAX,2
 Q_VFWD_ALT,5
 Q_WVANE_HGT_MIN,5
 Q_WVANE_TAKEOFF,0
+RALLY_INCL_HOME,1 # Only matters for engine-out, but safest to set this for everyone in case a rally accidentally ends up on a Volanti
 RC_PROTOCOLS,520
 RC1_MAX,2000
 RC1_MIN,1000
