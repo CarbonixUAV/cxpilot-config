@@ -128,6 +128,7 @@ PTCH2SRV_TCONST,0.4
 Q_BCK_PIT_LIM,8 # Used in hover modes when using Q_FWD_THR to prevent high load on the wing. 8 degrees is about 2g load at cruise on the older lighter quad; this is a good conservative value.
 Q_FWD_THR_GAIN,2.64
 Q_FWD_THR_USE,1
+Q_RTL_ALT,60 # This is the floor altitude for the engine-out spiral-to-land behavior
 Q_WVANE_GAIN,2
 RC_OPTIONS,8480 # 5:Arming check throttle, 8:CRSF passthrough telem, 13:ELRS 420kbaud
 RELAY1_FUNCTION,4
