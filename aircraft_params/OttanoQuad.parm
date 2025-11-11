@@ -61,7 +61,7 @@ Q_LOIT_SPEED,300
 Q_M_BAT_VOLT_MAX,50.4
 Q_M_BAT_VOLT_MIN,39.6
 Q_M_SPIN_ARM,0.07
-Q_M_SPIN_MIN,0.1 # DISABLE_CHECKS: this parameter should be a range restriction, but only values are defined
+Q_M_SPIN_MIN,0.1
 Q_M_THST_EXPO,0.582
 Q_M_THST_HOVER,0.554629
 Q_M_YAW_HEADROOM,100
