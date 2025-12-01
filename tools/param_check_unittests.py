@@ -101,6 +101,7 @@ class TestParamCheck(unittest.TestCase):
             call_args, _ = mock_subprocess.call_args
             arglist = call_args[0]
             self.assertIn(f'--vehicle={vehicle}', arglist)
+            self.assertIn('--no-legacy-params', arglist)
 
         # Test that the metadata was loaded and that the json was flattened
         metadata = generate_metadata('Plane')
