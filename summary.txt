@@ -1,0 +1,5 @@
+Target         Text (B)  Data (B)  BSS (B)  Total Flash Used (B)  Free Flash (B)  External Flash Used (B)
+---------------------------------------------------------------------------------------------------------
+CxPilot-7       1587564      2120   260148               1589684          376384  Not Applicable         
+CxPilot-8       1613864      2536   259736               1616400          349680  Not Applicable         
+This PR         1480464      2348   259912               1482812          483260  Not Applicable  
