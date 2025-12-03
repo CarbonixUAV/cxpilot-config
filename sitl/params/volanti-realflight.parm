@@ -16,11 +16,12 @@ BATT3_MONITOR,4
 BATT3_AMP_PERVLT,8.5
 BATT9_MONITOR,4
 @delete CAN_*
-GPS_TYPE,1
-GPS_TYPE2,1
+GPS1_TYPE,1
+GPS2_TYPE,1
 @delete INS_*
 LOG_REPLAY,0 # causes random crashes on the Cygwin SITL
 @delete NET_P* # don't create network serial ports by default in SITL
+@delete RC_PROTOCOLS # Allow all RC protocols
 RNGFND1_PIN,0
 RNGFND1_SCALING,40
 RNGFND1_TYPE,1

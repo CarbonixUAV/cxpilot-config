@@ -13,8 +13,8 @@ BATT3_MONITOR,4
 BATT3_AMP_PERVLT,8.5
 BATT9_MONITOR,4
 @delete CAN_*
-GPS_TYPE,1
-GPS_TYPE2,1
+GPS1_TYPE,1
+GPS2_TYPE,1
 @delete INS_*
 INS_ACC2OFFS_X,0.001
 INS_ACC2OFFS_Y,0.001
@@ -30,7 +30,7 @@ INS_ACCSCAL_Y,1.001
 INS_ACCSCAL_Z,1.001
 INS_GYR_CAL,0 # taken from quadplane autotest parameters, just in case
 LOG_REPLAY,0 # causes random crashes on the Cygwin SITL
-NAVL1_PERIOD,14
+NAVL1_PERIOD,14 # headless tune is a little different
 @delete NET_P* # don't create network serial ports by default in SITL
 @delete PTCH_RATE_*
 PTCH_RATE_FF,1.407055
@@ -52,6 +52,7 @@ Q_A_RATE_Y_MAX,12
 Q_A_SLEW_YAW,1500
 @delete Q_M_*
 @delete Q_P_*
+@delete RC_PROTOCOLS # Allow all RC protocols
 @delete RLL_RATE_*
 RLL_RATE_FF,0.552741
 RLL_RATE_I,0.2125

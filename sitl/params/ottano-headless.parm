@@ -17,8 +17,8 @@ BATT9_MONITOR,4
 @delete CAN_*
 @delete EFI_*
 EFI_TYPE,7
-GPS_TYPE,1
-GPS_TYPE2,1
+GPS1_TYPE,1
+GPS2_TYPE,1
 @delete INS_*
 INS_ACC2OFFS_X,0.001
 INS_ACC2OFFS_Y,0.001
@@ -57,6 +57,7 @@ Q_A_SLEW_YAW,1500
 @delete Q_WP_SPEED_DN # Headless sim hates our descent rate
 @delete Q_M_*
 @delete Q_P_*
+@delete RC_PROTOCOLS # Allow all RC protocols
 @delete RELAY*
 RELAY1_FUNCTION,2 # Ignition
 RELAY1_PIN,0 # Virtual pin 0
