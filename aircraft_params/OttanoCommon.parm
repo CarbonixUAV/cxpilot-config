@@ -132,7 +132,6 @@ Q_RTL_ALT,60 # This is the floor altitude for the engine-out spiral-to-land beha
 Q_WVANE_GAIN,2
 RALLY_LIMIT_KM,30 # Needed for engine-out. This is the furthest we could ever conceivably glide, if we had an incredible altitude approval
 RC_OPTIONS,8480 # 5:Arming check throttle, 8:CRSF passthrough telem, 13:ELRS 420kbaud
-RELAY1_FUNCTION,4
 RELAY2_FUNCTION,2
 RELAY2_PIN,1002
 RELAY3_FUNCTION,9
