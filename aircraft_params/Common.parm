@@ -78,6 +78,7 @@ Q_VFWD_ALT,5
 Q_WVANE_HGT_MIN,5
 Q_WVANE_TAKEOFF,0
 RALLY_INCL_HOME,1 # Only matters for engine-out, but safest to set this for everyone in case a rally accidentally ends up on a Volanti
+RC_OPTIONS,8480 # 5:Arming check throttle, 8:CRSF passthrough telem, 13:ELRS 420kbaud
 RC_PROTOCOLS,520
 RC1_MAX,2000
 RC1_MIN,1000
@@ -118,6 +119,7 @@ RNGFND1_TYPE,24
 RNGFND_LANDING,1
 RNGFND1_MAX_CM,15800
 RNGFND1_MIN_CM,5
+RSSI_TYPE,3 # Log ELRS receiver RSSI/LQ
 RTL_AUTOLAND,2
 RTL_RADIUS,200
 SCHED_LOOP_RATE,200
