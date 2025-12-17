@@ -60,7 +60,7 @@ RLL_RATE_IMAX,0.888889
 RLL_RATE_P,0.141009
 RNGFND1_PIN,0
 RNGFND1_SCALING,40
-RNGFND1_TYPE,1
+RNGFND1_TYPE,100
 @delete SCR_*_CHECKSUM
 @delete SERIAL* # SITL does not need to replicate serial assignments
 @delete SERVO*
