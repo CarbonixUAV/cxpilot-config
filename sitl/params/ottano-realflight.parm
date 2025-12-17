@@ -32,7 +32,7 @@ LOG_REPLAY,0 # causes random crashes on the Cygwin SITL
 @delete RC_PROTOCOLS # Allow all RC protocols
 RNGFND1_PIN,0
 RNGFND1_SCALING,40
-RNGFND1_TYPE,1
+RNGFND1_TYPE,100
 @delete SCR_*_CHECKSUM
 SCR_HEAP_SIZE,300000 # SITL runs more scripts and needs more heap space
 @delete SERIAL* # SITL does not need to replicate serial assignments
