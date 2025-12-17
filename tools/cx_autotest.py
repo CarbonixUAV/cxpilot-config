@@ -2,11 +2,12 @@
 Fly Carbonix aircraft in SITL
 """
 import os
+import random
 import sys
 import shutil
 import argparse
 import functools
-from typing import Any, Optional
+from typing import Any, Callable, Optional, Union
 from pathlib import Path
 from pymavlink import mavutil
 
@@ -31,23 +32,23 @@ class AutoTestCarbonix(AutoTestQuadPlane):
         Returns:
             dict: Dictionary of frame names and their details.
         """
-        raise NotImplementedError("This method should be overridden in subclasses")
+        return sitl_tools.get_frames()
+
+    def log_name(self):  # pyright: ignore[reportIncompatibleMethodOverride]
+        return f"{self.frame}"
+
+    def set_current_test_name(self, name):
+        self.current_test_name_directory = str(Path(__file__).parent / "autotest_files" / name)
 
     def __init__(self, binary, **kwargs):
         super().__init__(binary, **kwargs)
         if self.logs_dir is None:
             self.logs_dir = self.buildlogs_dirpath()
-
         if not isinstance(self.frame, str):
             raise TypeError(f"Frame must be a string, got {type(self.frame).__name__}")
-        if self.frame not in self.get_frames():
-            raise ValueError(
-                f"Invalid frame: {self.frame} for AutoTestHeadless. Valid frames are: {list(self.get_frames().keys())}"
-            )
 
-        defaults = self.model_defaults_filepath(self.frame)
-        assert len(defaults) == 1, f"Expected one defaults file for {self.frame}, got {defaults}"
-        defaults = defaults[0]
+        # Write the processed defaults file from the first file in the model_defaults_filepath list
+        defaults = self.model_defaults_filepath(self.frame)[0]
         sitl_tools.write_defaults_file(
             self.frame,
             defaults_out=Path(defaults),
@@ -62,11 +63,14 @@ class AutoTestCarbonix(AutoTestQuadPlane):
             "FENCE_AUTOENABLE": 0,      # disable fences
             "FENCE_ENABLE": 0,
             "FS_GCS_ENABL": 0,          # disable GCS failsafe
-            "TERRAIN_FOLLOW": 0,        # disable terrain follow (causes prearm fail; terrain requests require extra steps)
         }
 
     def model_defaults_filepath(self, model):
-        return [str(CXPILOT_CORE_ROOT / "build" / "sitl" / f"{model}.parm")]
+        # XXX: in the parent class, the "model" argument is actually a frame name
+        defaults = [str(CXPILOT_CORE_ROOT / "build" / "sitl" / f"{model}.parm")]
+        if "flightaxis" in self.get_model(model):
+            defaults.append(str(CXPILOT_CONFIG_ROOT / 'sitl' / 'params' / 'realflight-autotest-extra.parm'))
+        return defaults
 
     def get_model(self, frame):
         model = self.get_frames()[frame].get('model', '')
@@ -151,22 +155,6 @@ class AutoTestCarbonix(AutoTestQuadPlane):
             validator=validator,
             timeout=timeout,
         )
-
-    def disabled_tests(self):
-        return dict()
-
-
-class AutoTestHeadless(AutoTestCarbonix):
-    """
-    Carbonix SITL autotest for headless operation.
-    """
-    @classmethod
-    @functools.lru_cache(maxsize=1)
-    def get_frames(cls):
-        return {k: v for k, v in sitl_tools.get_frames().items() if not v.get('external', False)}
-
-    def log_name(self):  # pyright: ignore[reportIncompatibleMethodOverride]
-        return f"{self.frame}"
 
     def CX_BIT(self):
         '''Test Carbonix's Built-in-Test (BIT) script'''
@@ -393,6 +381,8 @@ class AutoTestHeadless(AutoTestCarbonix):
             # Restore everything
             self.context_pop()
 
+        self.install_terrain_handlers_context()
+
         # Count the number of ESCs
         frame_class = self.get_parameter('Q_FRAME_CLASS')
         if frame_class == 1:  # Quad
@@ -443,15 +433,313 @@ class AutoTestHeadless(AutoTestCarbonix):
         if has_engine:
             TestEngineWarnings()
 
-    def tests(self):
+    def tests(self) -> list[Any]:
         return [
             self.CX_BIT,
         ]
 
+    def disabled_tests(self):
+        return dict()
 
-STEPS = {
-    'test.Headless': AutoTestHeadless,
-}
+
+class AutoTestRealFlight(AutoTestCarbonix):
+    """
+    Carbonix SITL autotests using RealFlight
+    """
+    @classmethod
+    @functools.lru_cache(maxsize=1)
+    def get_frames(cls):
+        out = dict()
+        for k, v in sitl_tools.get_frames().items():
+            model = v.get('model', '')
+            if type(model) is str and model.startswith('flightaxis'):
+                out[k] = v
+        return out
+
+    def log_name(self):  # pyright: ignore[reportIncompatibleMethodOverride]
+        return f"{self.frame}"
+
+    def default_speedup(self):  # pyright: ignore[reportIncompatibleMethodOverride]
+        return 1
+
+    def sitl_start_location(self):
+        return mavutil.location(36.8325082, -2.8512096, 735, 0)  # AutoTest Hill
+
+    def do_guided(self, location):
+        '''Fly to a location in GUIDED mode'''
+        self.change_mode('GUIDED')
+        self.mav.mav.mission_item_int_send(  # pyright: ignore[reportOptionalMemberAccess, reportAttributeAccessIssue]
+            1,
+            1,
+            0,  # seq
+            mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT,
+            mavutil.mavlink.MAV_CMD_NAV_WAYPOINT,
+            2,  # current
+            0,  # autocontinue
+            0,  # p1
+            0,  # p2
+            0,  # p3
+            0,  # p4
+            int(location.lat * 1e7),  # latitude
+            int(location.lng * 1e7),  # longitude
+            location.alt)  # altitude
+
+    def RealFlightHover(self):
+        '''
+        Perform a simple hover test in RealFlight. Useful for generating logs
+        for comparative analysis.
+        '''
+        if not os.getenv("REALFLIGHT_IPADDR"):
+            self.progress("Specify an IP address with REALFLIGHT_IPADDR to run this test")
+            return
+
+        # Log fullrate attitude for PID Review Tool
+        self.set_parameters({
+            "LOG_BITMASK": 0x10FFFF,
+        })
+        # self.setup_RealFlight_vehicle()
+
+        # Disable engine-out prearm check
+        self.set_parameter('ENGOUT_PREARM', 0)
+
+        self.wait_ready_to_arm()
+        self.change_mode("QLOITER")
+        self.arm_vehicle()
+        self.set_rc(3, 2000)
+        self.wait_altitude(8, 12, relative=True)
+        self.set_rc(3, 1500)
+        stick_deflections = [
+            (2000, 1500, "Roll right"),
+            (1500, 1500, "Center"),
+            (1000, 1500, "Roll left"),
+            (1500, 1500, "Center"),
+            (1500, 2000, "Pitch forward"),
+            (1500, 1500, "Center"),
+            (1500, 1000, "Pitch back"),
+            (1500, 1500, "Center"),
+        ]
+        n_iterations = 10
+        for i in range(n_iterations):
+            print(f"Control input cycle: {i+1}/{n_iterations}")
+            for roll, pitch, msg in stick_deflections:
+                self.progress(f"{msg}")
+                self.set_rc(1, roll)
+                self.set_rc(2, pitch)
+                self.delay_sim_time(0.5)
+        self.change_mode("QLAND")
+        self.wait_disarmed(timeout=120)
+
+    def EngineOutScript(self):
+        '''Test engine out script in RealFlight'''
+        def kill_engine():
+            '''Mess with the ignition to simulate uncommanded engine shutdown'''
+            self.set_parameter('SIM_ICE_IGN_PIN', -1)
+
+        def restore_engine():
+            '''Restore the engine'''
+            # First shut down the engine to reset the max crank attempts
+            self.run_cmd(mavutil.mavlink.MAV_CMD_DO_ENGINE_CONTROL, p1=0)
+            self.set_parameter('SIM_ICE_IGN_PIN', 0)
+            self.run_cmd(mavutil.mavlink.MAV_CMD_DO_ENGINE_CONTROL, p1=1)
+
+        def reset_aircraft():
+            '''Reset aircraft and wait for it to be ready to arm'''
+            self.disarm_vehicle(force=True)
+            self.reboot_sitl()
+            self.set_rc(3, 1000)
+            self.change_mode('QHOVER')
+            restore_engine()
+            self.wait_rpm(1, 1000, 3000)
+            self.wait_ready_to_arm()
+
+        def basic_auto_mission(heading, target, is_guided=False,
+                               min_distance=0, max_distance=50,
+                               qassist_timeout=0, qrtl_timeout=0):
+            '''
+            Run the basic auto mission, and kill the engine when we reach
+            the desired altitude and heading. By testing many different
+            headings, we confirm that the landing behavior works regardless of
+            which angle we happen to be facing relative to the wind when we
+            reach the desired landing altitude.
+
+            Specify the target landing point, which is a rally point by default
+            or a guided point if is_guided is True.
+
+            You can optionally specify a minimum and maximum distance to the
+            target for the test to pass, and you can override the Q_ASSIST and
+            QRTL timeouts to test that they work as expected.
+            '''
+
+            subtest_message = \
+                f"Basic mission test with heading {heading:.0f}" + \
+                " and " + ("guided" if is_guided else "rally") + \
+                f" {target.lat:.6f}, {target.lng:.6f}"
+
+            if qassist_timeout:
+                subtest_message = "Testing that the Q_ASSIST timeout works"
+            if qrtl_timeout:
+                subtest_message = "Testing that the QRTL timeout works"
+
+            self.start_subtest(subtest_message)
+
+            reset_aircraft()
+            if not is_guided:
+                self.upload_rally_points_from_locations([target])
+            if qassist_timeout:
+                self.set_parameter("ENGOUT_QAST_TIME", qassist_timeout)
+            if qrtl_timeout:
+                self.set_parameter("ENGOUT_QRTL_TIME", qrtl_timeout)
+            self.change_mode('AUTO')
+            self.arm_vehicle()
+            self.set_rc(3, 1500)
+
+            self.wait_current_waypoint(4, timeout=600)
+
+            # Wait for the aircraft to reach the desired heading
+            self.wait_heading(heading, 5, timeout=300)
+
+            kill_engine()
+
+            if is_guided:
+                self.wait_mode('RTL')
+                self.delay_sim_time(10)
+                self.do_guided(target)
+
+            if qassist_timeout:
+                self.wait_text("Q_ASSIST for too long", timeout=600)
+            elif qrtl_timeout:
+                self.wait_text("QRTL for too long", timeout=600)
+
+            # Wait for the aircraft to land
+            self.wait_disarmed(timeout=600)
+
+            # Confirm the expected distance to the target
+            if not qassist_timeout and not qrtl_timeout:
+                self.assert_distance(
+                    target, self.mav.location(),  # pyright: ignore[reportOptionalMemberAccess, reportAttributeAccessIssue] # noqa: E501
+                    min_distance=min_distance,
+                    max_distance=max_distance)
+
+            self.end_subtest(subtest_message)
+
+        self.install_terrain_handlers_context()
+
+        # Disable engine temperature prearm checks
+        self.set_parameter('BIT_PREARM_DIS', 0b100)
+        # This test doesn't work well with RALLY_INCL_HOME set
+        self.set_parameter('RALLY_INCL_HOME', 0)
+
+        # Reboot
+        self.reboot_sitl()
+
+        # Upload mission
+        self.load_mission("mission.waypoints")
+        # Load rally point
+        # (we set a stupid altitude on purpose; it should not be used)
+        rally_loc = mavutil.location(36.8164241, -2.868918, 5000, 0)
+        guided_loc = mavutil.location(36.8192676, -2.8719136, 5000, 0)
+
+        # =============================================
+        #            Test guided override
+        # =============================================
+        self.upload_rally_points_from_locations([rally_loc])
+        basic_auto_mission(270, guided_loc, is_guided=True)
+
+        # =============================================
+        # Test regular landings from many random angles
+        # =============================================
+
+        # Killing the engine at random headings to make sure the landing always
+        # goes smoothly no matter which orientation compared to the wind we are
+        # at when we reach the landing altitude.
+        headings = list(range(0, 360, 90)) + random.sample(range(360), 4)
+        for heading in headings:
+            basic_auto_mission(heading, rally_loc)
+
+        # =============================================
+        #          Test the Q_ASSIST timeout
+        # =============================================
+        basic_auto_mission(270, rally_loc, qassist_timeout=1, min_distance=0, max_distance=300)
+
+        # =============================================
+        #            Test the QRTL timeout
+        # =============================================
+        basic_auto_mission(270, rally_loc, qrtl_timeout=5, min_distance=50, max_distance=300)
+
+        # =====================================================================
+        # Test detection messages, and the backup and restore of all parameters
+        # =====================================================================
+        self.start_subtest("Testing detections and parameters backup/restore")
+        reset_aircraft()
+        self.change_mode('AUTO')
+        self.arm_vehicle()
+        self.set_rc(3, 1500)
+        params_before, _ = self.download_parameters(self.sysid_thismav(), 1)
+        self.wait_current_waypoint(4, timeout=600)
+        kill_engine()
+        self.wait_text("Engine out")
+        self.delay_sim_time(1)
+        # Read all parameters
+        params_after, _ = self.download_parameters(self.sysid_thismav(), 1)
+        param_ignore_filter = ["STAT"]
+        # Print differences
+        for p in params_before:
+            if any(p.startswith(s) for s in param_ignore_filter):
+                continue
+            if params_before[p] != params_after[p]:
+                self.progress(f"{p} changed from {params_before[p]} to {params_after[p]}")
+
+        # Restore the engine
+        delay = self.get_parameter("ENGOUT_STRTDELAY")
+        restore_engine()
+        self.wait_rpm(1, 1000, 3000)
+        self.delay_sim_time(delay + 5)
+        # Read the parameters again
+        params_after, _ = self.download_parameters(self.sysid_thismav(), 1)
+        # Assert that all parameters are the same
+        for p in params_before:
+            if any(p.startswith(s) for s in param_ignore_filter):
+                continue
+            if params_before[p] != params_after[p]:
+                raise ValueError(f"{p} changed from {params_before[p]} to {params_after[p]}")
+
+        # Force disarm and end the subtest
+        self.disarm_vehicle(force=True)
+        self.wait_disarmed()
+        self.end_subtest("Testing detections and parameters backup/restore")
+
+        # =============================================
+        #             Test prearm checks
+        # =============================================
+        self.start_subtest("Testing prearm checks")
+        reset_aircraft()
+
+        # Deliberately set too low of a value for GLIDE_SPD
+        backup = self.get_parameter("ENGOUT_GLIDE_SPD")
+        self.set_parameter("ENGOUT_GLIDE_SPD", 1)
+        self.wait_not_ready_to_arm()
+        self.set_parameter("ENGOUT_GLIDE_SPD", backup)
+        self.wait_ready_to_arm()
+
+        # Deliberately set too high of a value for GLIDE_SPD
+        self.set_parameter("ENGOUT_GLIDE_SPD", 100)
+        self.wait_not_ready_to_arm()
+        self.set_parameter("ENGOUT_GLIDE_SPD", backup)
+        self.wait_ready_to_arm()
+
+        # Turn off the engine
+        self.run_cmd(mavutil.mavlink.MAV_CMD_DO_ENGINE_CONTROL, p1=0)
+        self.wait_not_ready_to_arm()
+        self.run_cmd(mavutil.mavlink.MAV_CMD_DO_ENGINE_CONTROL, p1=1)
+        self.wait_ready_to_arm()
+
+        self.end_subtest("Testing prearm checks")
+
+    def tests(self) -> list[Union[Callable[[], None], Test]]:
+        return [
+            self.RealFlightHover,
+            self.EngineOutScript,
+        ]
 
 
 def _run_one(tester_cls: type[TestSuite], frame: str, subtest: Optional[str]) -> tuple[bool, TestSuite]:
@@ -476,65 +764,55 @@ def _run_one(tester_cls: type[TestSuite], frame: str, subtest: Optional[str]) ->
     return result, tester
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Run Carbonix SITL autotests")
-    parser.add_argument('--build', action='store_true', help="Build the SITL binary before running tests")
-    parser.add_argument('--no-clean', action='store_true', help="Do not run waf with --clean")
-    parser.add_argument('tests', nargs='*', default=None,
-                        help="Specs: test.<Class>[.<Subtest>][.<frame>]")
-    args = parser.parse_args()
-
+def _prepare_environment():
+    '''Change directory and set environment variables'''
     os.chdir(CXPILOT_CORE_ROOT)
-
     buildlogs_dir = CXPILOT_ROOT.parent / "buildlogs"
     buildlogs_dir.mkdir(exist_ok=True)
     os.environ['BUILDLOGS'] = str(buildlogs_dir)
 
-    if args.build:
-        # ROMFS_custom should never exist at this point. I sometimes use it
-        # temporarily in SITL to test specific things, but if it sticks around
-        # long term, it causes very subtle issues. If you are running an
-        # autotest you certainly don't want ROMFS_custom to exist.
-        romfs_custom = CXPILOT_CORE_ROOT / "ROMFS_custom"
-        if romfs_custom.exists():
-            raise RuntimeError(
-                "Delete the ROMFS_custom directory before running autotests."
-            )
-        try:
-            PLANE_BINARY.unlink(missing_ok=True)  # Path
-        except Exception:
-            pass
-        util.build_SITL('bin/arduplane', clean=(not args.no_clean))
-        if not PLANE_BINARY.exists():
-            raise RuntimeError(f"Failed to build {PLANE_BINARY}")
 
-    specs = list(STEPS.keys()) if not args.tests else args.tests
+def _build_sitl(clean: bool):
+    '''Build the SITL binary'''
+    # ROMFS_custom should never exist at this point. I sometimes use it
+    # temporarily in SITL to test specific things, but if it sticks around
+    # long term, it causes very subtle issues. If you are running an
+    # autotest you certainly don't want ROMFS_custom to exist.
+    romfs_custom = CXPILOT_CORE_ROOT / "ROMFS_custom"
+    if romfs_custom.exists():
+        raise RuntimeError(
+            "Delete the ROMFS_custom directory before running autotests."
+        )
+    PLANE_BINARY.unlink(missing_ok=True)  # Path
+    util.build_SITL('bin/arduplane', clean=clean)
+    if not PLANE_BINARY.exists():
+        raise RuntimeError(f"Failed to build {PLANE_BINARY}")
 
+
+def _run_test(test: str, frames: list[str]) -> list[str]:
     failed_test_labels = []
-    for spec in specs:
-        parts = spec.split('.')
-        if len(parts) < 2 or parts[0] != 'test':
-            raise ValueError(f"Bad spec: {spec}")
-        cls_name = parts[1]
-        key = f"test.{cls_name}"
-        tester_cls = STEPS.get(key)
-        if tester_cls is None:
-            raise ValueError(f"Unknown test class: {cls_name}")
-        rest = parts[2:]
-        frames_all = list(tester_cls.get_frames().keys())
-        frame = rest[-1] if rest and rest[-1] in frames_all else None
-        subtest = '.'.join(rest[:-1] if frame else rest) or None
-        frames = [frame] if frame else frames_all
-        for f in frames:
-            util.run_cmd('/bin/rm -f logs/*.BIN logs/LASTLOG.TXT')
-            ok, tester = _run_one(tester_cls, f, subtest)
-            test_name = f"{cls_name}" + (f".{subtest}" if subtest else "")
-            label = f"{test_name} on {f}"
-            print(f">>>>>>> {'PASSED' if ok else 'FAILED'}: {label}.")
-            if not ok:
-                tester.check_logs(f"{test_name}.{f}")
-                failed_test_labels.append(label)
+    parts = test.split('.')
+    if len(parts) < 2 or parts[0] != 'test':
+        raise ValueError(f"Bad test name: {test}")
+    name = ".".join(parts[0:2])
+    tester_cls = STEPS.get(name, None)
+    if tester_cls is None:
+        raise ValueError(f"Unknown test class: {name}")
+    rest = parts[2:]
+    subtest = ".".join(rest) or None
+    for f in frames:
+        util.run_cmd('/bin/rm -f logs/*.BIN logs/LASTLOG.TXT')
+        ok, tester = _run_one(tester_cls, f, subtest)
+        test_name = f"{name}" + (f".{subtest}" if subtest else "")
+        label = f"{test_name} on {f}"
+        print(f">>>>>>> {'PASSED' if ok else 'FAILED'}: {label}.")
+        if not ok:
+            tester.check_logs(f"{test_name}.{f}")
+            failed_test_labels.append(label)
+    return failed_test_labels
 
+
+def _print_summary(failed_test_labels: list[str]):
     if failed_test_labels:
         N = len(failed_test_labels)
         if N == 1:
@@ -546,6 +824,46 @@ def main():
         )
     else:
         print("All tests passed successfully!")
+
+
+STEPS = {
+    'test.Carbonix': AutoTestCarbonix,
+    'test.RealFlight': AutoTestRealFlight,
+}
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Run Carbonix SITL autotests")
+    parser.add_argument('--build', action='store_true', help="Build the SITL binary before running tests")
+    parser.add_argument('--no-clean', action='store_true', help="Do not run waf with --clean")
+    parser.add_argument('--frames', nargs='*', default=None, help="Frames to test (default: all headless frames)")
+    parser.add_argument(
+        'tests', nargs='*', default=None, help="test.<Class>[.<Subtest>] (default: all applicable tests for the frames)"
+    )
+    args = parser.parse_args()
+
+    _prepare_environment()
+
+    if args.build:
+        _build_sitl(clean=(not args.no_clean))
+
+    if args.frames is None:
+        args.frames = [k for k, v in sitl_tools.get_frames().items() if not v.get('external', False)]
+
+    if not args.tests:
+        args.tests = []
+        for name, cls in STEPS.items():
+            frames_all = list(cls.get_frames().keys())
+            # if any frame in args.frames is in frames_all, add test
+            if any(f in frames_all for f in args.frames):
+                args.tests.append(name)
+                continue
+
+    failed_test_labels = []
+    for test in args.tests:
+        failed_test_labels.extend(_run_test(test, args.frames))
+
+    _print_summary(failed_test_labels)
 
 
 if __name__ == "__main__":
