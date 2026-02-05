@@ -56,9 +56,12 @@ follows:
     - `Q_ASSIST_ALT` is set to match `Q_RTL_ALT`
     - `Q_ASSIST_SPEED`, if disabled, will be set to 0.1 to ensure that
       `Q_ASSIST_ALT` and `Q_ASSIST_ANGLE` will work.
+    - `Q_RTL_MODE` is set to 0 to prevent automatic QRTL behavior.
     - `Q_TRANS_FAIL` is set to 0 to prevent triggering QLand after a long period
       of Q Assist.
-  - The mode will change to RTL.
+  - If the aircraft is already below `Q_RTL_ALT`, the script will switch
+    directly to QLand instead of attempting RTL.
+  - Otherwise, the mode will change to RTL.
   - If the aircraft reaches the landing area with altitude to spare, it will
     orbit until it gets low enough to activate Q Assist.
   - Once Q Assist is engaged, either in an orbit or en route, it will coasts
