@@ -678,17 +678,16 @@ def _get_git_commit_ids() -> tuple[str, str, str]:
     Return (integration_id, core_id, config_id) as 8-hex commit hashes with markers.
 
     Semantics:
-      '*' means that repo's working tree has uncommitted changes. For the
-      integration repo, this only reflects the top-level worktree; submodule WT
-      dirtiness does not set '*'.
+      '*' means uncommitted changes exist. For the integration repo, this appears
+      if the top-level worktree OR any submodule has uncommitted changes. This
+      makes non-reproducible builds immediately obvious.
 
-      '+' appears only on the integration ID and means submodules are not at
-      the recorded SHAs for the current integration commit or have local
-      changes while the top-level WT is clean.
+      '+' appears only on the integration ID and means submodules are at different
+      commits than the recorded pointers, but everything is clean (no dirty state).
 
       In short:
-      '+' says "inspect the XML for exact submodule SHAs"; '*' says
-      "reproducibility is blown".
+      '*' says "reproducibility is blown - something is dirty"
+      '+' says "clean but wrong commits - inspect XML for exact submodule SHAs"
 
     Hashes come from `git rev-parse --short=8 HEAD`. No enforcement is
     performed here; callers decide how to treat '*' and '+'. Repos are resolved
@@ -709,14 +708,47 @@ def _get_git_commit_ids() -> tuple[str, str, str]:
             args.append('--ignore-submodules=all')
         return bool(subprocess.check_output(args, cwd=repo_path, text=True).strip())
 
+    def _submodules_sha_mismatch() -> bool:
+        """Check if submodules are at different commits than the pinned pointers.
+
+        Only checks commit SHA mismatch, not dirty state. Dirty state is handled
+        separately to ensure any non-reproducible state gets a '*' marker.
+        """
+        # Get the pinned commit for cxpilot-core (full SHA)
+        pinned_core = subprocess.check_output(
+            ['git', 'ls-tree', 'HEAD', 'cxpilot-core'],
+            cwd=CXPILOT_ROOT,
+            text=True).split()[2]
+        # Get checked out commit (full SHA for comparison)
+        checked_out_core = subprocess.check_output(
+            ['git', 'rev-parse', 'HEAD'],
+            cwd=CXPILOT_CORE_ROOT,
+            text=True).strip()
+
+        # Get the pinned commit for cxpilot-config (full SHA)
+        pinned_config = subprocess.check_output(
+            ['git', 'ls-tree', 'HEAD', 'cxpilot-config'],
+            cwd=CXPILOT_ROOT,
+            text=True).split()[2]
+        # Get checked out commit (full SHA for comparison)
+        checked_out_config = subprocess.check_output(
+            ['git', 'rev-parse', 'HEAD'],
+            cwd=CXPILOT_CONFIG_ROOT,
+            text=True).strip()
+
+        return (pinned_core != checked_out_core or pinned_config != checked_out_config)
+
     integration_commit_id = _get_hash(CXPILOT_ROOT)
     core_commit_id = _get_hash(CXPILOT_CORE_ROOT)
     config_commit_id = _get_hash(CXPILOT_CONFIG_ROOT)
 
-    # Check if the repos are dirty
-    if _is_dirty(CXPILOT_ROOT, ignore_submodules=True):
+    # Check if any repo is dirty - propagate '*' to integration for visibility
+    # This makes non-reproducible builds immediately obvious
+    if (_is_dirty(CXPILOT_ROOT, ignore_submodules=True) or
+        _is_dirty(CXPILOT_CORE_ROOT) or
+        _is_dirty(CXPILOT_CONFIG_ROOT)):
         integration_commit_id += '*'
-    elif _is_dirty(CXPILOT_ROOT):
+    elif _submodules_sha_mismatch():
         integration_commit_id += '+'
     if _is_dirty(CXPILOT_CORE_ROOT):
         core_commit_id += '*'
