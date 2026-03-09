@@ -204,5 +204,9 @@
             <source_path>scripts/modules/utilities.lua</source_path>
             <destination_path>modules/utilities.lua</destination_path>
         </lua_script>
+        <lua_script>
+            <source_path>scripts/cx_fence_qland.lua</source_path>
+            <destination_path>cx_fence_qland.lua</destination_path>
+        </lua_script>
     </lua_script_list>
 </data>
