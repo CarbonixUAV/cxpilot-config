@@ -9,7 +9,7 @@ import argparse
 import functools
 from typing import Any, Callable, Optional, Union
 from pathlib import Path
-from pymavlink import mavutil
+from pymavlink import mavparm, mavutil
 
 import sitl_tools
 from paths import CXPILOT_ROOT, CXPILOT_CORE_ROOT, CXPILOT_CONFIG_ROOT
@@ -96,6 +96,66 @@ class AutoTestCarbonix(AutoTestQuadPlane):
             dest_root=dest_root,
             symlink=True,
         )
+
+    def do_guided(self, location):
+        '''Fly to a location in GUIDED mode'''
+        self.change_mode('GUIDED')
+        self.mav.mav.mission_item_int_send(  # pyright: ignore[reportOptionalMemberAccess, reportAttributeAccessIssue]
+            1,
+            1,
+            0,  # seq
+            mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT,
+            mavutil.mavlink.MAV_CMD_NAV_WAYPOINT,
+            2,  # current
+            0,  # autocontinue
+            0,  # p1
+            0,  # p2
+            0,  # p3
+            0,  # p4
+            int(location.lat * 1e7),  # latitude
+            int(location.lng * 1e7),  # longitude
+            location.alt)  # altitude
+
+    def prepare_engine(self, rapid_warmup=False):
+        '''Start the ICE engine, wait for warmup and runup'''
+        self.progress('Starting engine')
+        self.set_rc(3, 1000)
+        self.change_mode('MANUAL')
+        self.set_safetyswitch_off()
+        self.run_cmd_int(
+            command=mavutil.mavlink.MAV_CMD_DO_ENGINE_CONTROL,
+            p1=1,  # Start the engine
+        )
+        self.wait_rpm(1, 1000, 9000, timeout=10)
+        self.progress('Engine started successfully')
+
+        self.progress('Waiting for engine warmup')
+        if rapid_warmup:
+            self.set_rc(3, 2000)
+        self.wait_for_engine_temp(idx=1, temp_min=120, temp_max=300, timeout=600)
+        self.wait_for_engine_temp(idx=2, temp_min=120, temp_max=300, timeout=600)
+
+        self.progress('Engine runup')
+        self.set_rc(3, 2000)
+        self.wait_rpm(1, 6500, 8000, timeout=10)
+        self.set_rc(3, 1000)
+        self.wait_rpm(1, 2000, 4000, timeout=10)
+
+    def restore_fence_defaults(self):
+        '''Restore fence parameters from the frame's defaults file.
+
+        Most tests run with fences disabled (see default_parameter_list).
+        This re-applies the fence settings from our shipped defaults so
+        that fence tests exercise the real configuration.
+        '''
+        defaults_path = self.model_defaults_filepath(str(self.frame))[0]
+        parameters = mavparm.MAVParmDict()
+        if not parameters.load(defaults_path):
+            raise ValueError(f"Failed to load {defaults_path}")
+        fence_params = {p: parameters[p] for p in parameters if p.startswith('FENCE_')}
+        if not fence_params:
+            raise ValueError(f"No FENCE_ params found in {defaults_path}")
+        self.set_parameters(fence_params)
 
     def assert_no_text(self, *args, **kwargs):
         '''Assert that a text message does not come in within a timeout'''
@@ -310,28 +370,10 @@ class AutoTestCarbonix(AutoTestQuadPlane):
             self.context_collect('STATUSTEXT')
             self.wait_ready_to_arm()
 
-            self.progress('Starting engine')
-            self.set_rc(3, 1000)
-            self.change_mode('MANUAL')
-            self.set_safetyswitch_off()
-            self.run_cmd_int(
-                command=mavutil.mavlink.MAV_CMD_DO_ENGINE_CONTROL,
-                p1=1,  # Start the engine
-            )
-            self.wait_rpm(1, 1000, 9000, timeout=10)
-            self.progress('Engine started successfully')
+            self.prepare_engine()
+            # Check that we received engine-cold warnings during the startup and warmup
             self.wait_text('Engine cold', check_context=True)
-
-            self.progress('Waiting for engine warmup')
-            self.wait_for_engine_temp(idx=1, temp_min=120, temp_max=300, timeout=600)
-            self.wait_for_engine_temp(idx=2, temp_min=120, temp_max=300, timeout=600)
             self.wait_text('Engine needs runup to', check_context=True)
-
-            self.progress('Engine runup')
-            self.set_rc(3, 2000)
-            self.wait_rpm(1, 6500, 8000, timeout=10)
-            self.set_rc(3, 1000)
-            self.wait_rpm(1, 2000, 4000, timeout=10)
             self.wait_ready_to_arm()
 
             self.progress('Overheat engine')
@@ -433,9 +475,129 @@ class AutoTestCarbonix(AutoTestQuadPlane):
         if has_engine:
             TestEngineWarnings()
 
+    def FenceTests(self):
+        '''Test polygon fence, and the QLand fence script behavior'''
+        def assert_guided_hold(location, name):
+            '''Assert the vehicle stays in GUIDED near a location'''
+            self.do_guided(location)
+            self.wait_and_maintain(
+                value_name=f'guided at {name}',
+                target=1,
+                current_value_getter=lambda: (
+                    1 if self.mode_is('GUIDED', drain_mav=False)
+                    and self.get_distance(self.mav.location(), location) < 300  # type: ignore
+                    else 0
+                ),
+                accuracy=0,
+                timeout=90,
+                minimum_duration=60,
+            )
+
+        self.restore_fence_defaults()
+
+        # Restart SITL at the mission's home location (CMAC)
+        self.customise_SITL_commandline([
+            "--home", self.sitl_home_string_from_mission("mission.waypoints"),
+        ])
+
+        has_engine = self.get_parameter('ICE_ENABLE')
+        if has_engine:
+            self.prepare_engine(rapid_warmup=True)
+
+        # Load mission and fence
+        self.load_mission("mission.waypoints")
+        self.load_fence_using_mavwp("fence.waypoints")
+
+        # Breach locations
+        near_breach = mavutil.location(-35.3632960, 149.1737795, 100, 0)
+        far_breach = mavutil.location(-35.3642759, 149.1294479, 400, 0)
+        # Waypoint 3 staging area (read from mission file)
+        items = self.mission_from_filepath(
+            os.path.join(self.current_test_name_directory, "mission.waypoints"))
+        wp3_item = items[3]
+        wp3 = mavutil.location(wp3_item.x * 1e-7, wp3_item.y * 1e-7, wp3_item.z, 0)
+
+        self.wait_ready_to_arm()
+        self.change_mode('AUTO')
+        self.arm_vehicle()
+        self.set_rc(3, 1500)
+
+        # Fly mission to wp3 (3-turn loiter) and wait to be near it
+        self.wait_current_waypoint(3, timeout=300)
+        self.wait_distance_to_location(wp3, 0, 300, timeout=60)
+
+        # =============================================
+        #  Near breach (<2km) — expect RTL, no QLand
+        # =============================================
+        self.start_subtest('Fence breach <2km from home (expect RTL only)')
+        self.context_push()
+        self.context_collect('STATUSTEXT')
+
+        self.do_guided(near_breach)
+        self.wait_mode('AUTO', timeout=300)
+
+        # Give the script time to (not) fire
+        self.assert_no_text('Fence breach.*QLand', timeout=3, regex=True, check_context=True)
+        self.assert_mode_is('AUTO')
+
+        # Confirm we can override with guided and stay there
+        assert_guided_hold(near_breach, 'near_breach')
+
+        self.context_pop()
+
+        # Resume mission at wp3
+        self.set_current_waypoint(3, check_afterwards=False)
+        self.change_mode('AUTO')
+        self.wait_distance_to_location(wp3, 0, 300, timeout=300)
+
+        # =============================================
+        #  Far breach (>2km) — expect QLand
+        # =============================================
+        self.start_subtest('Fence breach >2km from home (expect QLand)')
+        self.context_push()
+        self.context_collect('STATUSTEXT')
+
+        self.do_guided(far_breach)
+        self.wait_text('Fence breach.*QLand', timeout=600,
+                       regex=True, check_context=True)
+        self.wait_mode('QLAND', timeout=10)
+
+        # Confirm we can override with guided and stay there
+        assert_guided_hold(far_breach, 'far_breach')
+
+        self.context_pop()
+
+        # =============================================
+        #  Fence disabled — expect no QLand at far breach
+        # =============================================
+        self.start_subtest('Fence disabled, far breach (expect no QLand)')
+        self.context_push()
+        self.context_collect('STATUSTEXT')
+
+        # Return to wp3 first
+        self.do_guided(wp3)
+        self.wait_distance_to_location(wp3, 0, 300, timeout=300)
+
+        # Disable fence via MAV_CMD (not param), then fly to far breach
+        self.do_fence_disable()
+        self.do_guided(far_breach)
+        self.wait_distance_to_location(far_breach, 0, 300, timeout=300)
+
+        # Confirm no QLand triggered
+        self.assert_no_text('Fence breach.*QLand', timeout=3,
+                            regex=True, check_context=True)
+        self.assert_mode_is('GUIDED')
+
+        self.context_pop()
+
+        # RTL and land
+        self.change_mode('RTL')
+        self.wait_disarmed(timeout=600)
+
     def tests(self) -> list[Any]:
         return [
             self.CX_BIT,
+            self.FenceTests,
         ]
 
     def disabled_tests(self):
@@ -464,25 +626,6 @@ class AutoTestRealFlight(AutoTestCarbonix):
 
     def sitl_start_location(self):
         return mavutil.location(36.8325082, -2.8512096, 735, 0)  # AutoTest Hill
-
-    def do_guided(self, location):
-        '''Fly to a location in GUIDED mode'''
-        self.change_mode('GUIDED')
-        self.mav.mav.mission_item_int_send(  # pyright: ignore[reportOptionalMemberAccess, reportAttributeAccessIssue]
-            1,
-            1,
-            0,  # seq
-            mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT,
-            mavutil.mavlink.MAV_CMD_NAV_WAYPOINT,
-            2,  # current
-            0,  # autocontinue
-            0,  # p1
-            0,  # p2
-            0,  # p3
-            0,  # p4
-            int(location.lat * 1e7),  # latitude
-            int(location.lng * 1e7),  # longitude
-            location.alt)  # altitude
 
     def RealFlightHover(self):
         '''
