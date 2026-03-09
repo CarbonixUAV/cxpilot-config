@@ -423,8 +423,6 @@ class AutoTestCarbonix(AutoTestQuadPlane):
             # Restore everything
             self.context_pop()
 
-        self.install_terrain_handlers_context()
-
         # Count the number of ESCs
         frame_class = self.get_parameter('Q_FRAME_CLASS')
         if frame_class == 1:  # Quad
@@ -594,11 +592,24 @@ class AutoTestCarbonix(AutoTestQuadPlane):
         self.change_mode('RTL')
         self.wait_disarmed(timeout=600)
 
-    def tests(self) -> list[Any]:
+    def _pretest_hook(self):
+        self.install_terrain_handlers_context()
+
+    def _wrap_test(self, test_func):
+        @functools.wraps(test_func)
+        def wrapper():
+            self._pretest_hook()
+            test_func()
+        return wrapper
+
+    def _raw_tests(self) -> list[Any]:
         return [
             self.CX_BIT,
             self.FenceTests,
         ]
+
+    def tests(self) -> list[Any]:
+        return [self._wrap_test(t) for t in self._raw_tests()]
 
     def disabled_tests(self):
         return dict()
@@ -765,8 +776,6 @@ class AutoTestRealFlight(AutoTestCarbonix):
 
             self.end_subtest(subtest_message)
 
-        self.install_terrain_handlers_context()
-
         # Disable engine temperature prearm checks
         self.set_parameter('BIT_PREARM_DIS', 0b100)
         # This test doesn't work well with RALLY_INCL_HOME set
@@ -878,7 +887,7 @@ class AutoTestRealFlight(AutoTestCarbonix):
 
         self.end_subtest("Testing prearm checks")
 
-    def tests(self) -> list[Union[Callable[[], None], Test]]:
+    def _raw_tests(self) -> list[Union[Callable[[], None], Test]]:
         return [
             self.RealFlightHover,
             self.EngineOutScript,
