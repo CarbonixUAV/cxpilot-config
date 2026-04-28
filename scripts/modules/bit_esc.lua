@@ -30,6 +30,16 @@ local ESC = {
     wait_for_safety_cooldown = 0,
 
     srv_functions = {33, 34, 35, 36, 70},
+
+    -- Per-iter timing for each ESC's last_update_ms read. millis() captured
+    -- right before each esc_telem:get_last_telem_data_ms() call. Logged once
+    -- per update() as a BITT packet so that preemption-driven timing spikes
+    -- are visible per-ESC across the for-loop. last_telem_ms is the value
+    -- get_last_telem_data_ms returned for each ESC, logged as BITS so that
+    -- a stalled-timestamp branch firing is directly visible against the iter
+    -- timing.
+    read_ms = {0, 0, 0, 0, 0, 0, 0, 0},
+    last_telem_ms = {0, 0, 0, 0, 0, 0, 0, 0},
 }
 
 -- Get the number of ESCs based on the aircraft type
@@ -106,7 +116,9 @@ function ESC:update()
 
     -- check for errors
     for i = 1, self.number_of_esc  do
+        self.read_ms[i] = millis():toint()
         local esc_last_telem_data_ms = esc_telem:get_last_telem_data_ms(i-1):toint()
+        self.last_telem_ms[i] = esc_last_telem_data_ms
         local esc_rpm = esc_telem:get_rpm(i-1)
         local servo_out = SRV_Channels:get_output_pwm(self.srv_functions[i])
         -- Telem data timestamp check
@@ -168,6 +180,20 @@ function ESC:update()
             self.srv_prv_telem_ms[i] = esc_last_telem_data_ms
         end
     end
+
+    -- Log the millis() at each ESC's read so per-iter preemption shows up as
+    -- gaps between consecutive read_ms[] values. 8 fields always logged; unused
+    -- slots stay at 0.
+    logger:write("BITT", "t1,t2,t3,t4,t5,t6,t7,t8", "IIIIIIII",
+                 self.read_ms[1], self.read_ms[2], self.read_ms[3], self.read_ms[4],
+                 self.read_ms[5], self.read_ms[6], self.read_ms[7], self.read_ms[8])
+
+    -- Log the get_last_telem_data_ms values. Crossing-checking BITS[i] against
+    -- BITT[i]: BITS[i] == BITS[i-iter] (between two consecutive iters of this
+    -- script) is exactly the timestamp-stall trigger condition.
+    logger:write("BITS", "s1,s2,s3,s4,s5,s6,s7,s8", "IIIIIIII",
+                 self.last_telem_ms[1], self.last_telem_ms[2], self.last_telem_ms[3], self.last_telem_ms[4],
+                 self.last_telem_ms[5], self.last_telem_ms[6], self.last_telem_ms[7], self.last_telem_ms[8])
 end
 
 -- Return error messages
