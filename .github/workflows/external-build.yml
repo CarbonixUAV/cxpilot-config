@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - name: Create app token for integration repo
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         id: app
         with:
           app-id: ${{ secrets.CI_BOT_APP_ID }}
@@ -21,7 +21,7 @@ jobs:
           repositories: cxpilot
 
       - name: Dispatch build workflow
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           github-token: ${{ steps.app.outputs.token }}
           script: |
