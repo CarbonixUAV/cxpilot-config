@@ -12,6 +12,7 @@ ARSPD2_RATIO,1.6
 ARSPD2_SKIP_CAL,1
 ARSPD2_TYPE,8
 ARSPD2_USE,1
+BRD_IDLE_STATS,2 # write true CPU avg/peak load to "PM2" message in logs
 BRD_RTC_TYPES,7
 BRD_SAFETY_DEFLT,1
 BRD_SAFETY_MASK,32736 # Servos 6-15 enabled DISABLE_CHECKS: servos above 14 are not mentioned in the param docs, because this was originally written for Pixhawk/Cube-type boards with 14 physical servo outputs
