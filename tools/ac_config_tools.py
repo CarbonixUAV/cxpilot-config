@@ -545,7 +545,8 @@ def _process_defaults(file: Path, depth: int = 0) -> list[str]:
 def _strip_defaults(defaults: list[str]) -> list[str]:
     """
     Strip comments and whitespace from a list of default parameters and combine
-    the separation of names and values to a single comma.
+    the separation of names and values to a single comma. A trailing
+    "@READONLY" flag is preserved.
 
     Args:
         defaults (list[str]): List of default parameters.
@@ -561,13 +562,18 @@ def _strip_defaults(defaults: list[str]) -> list[str]:
         line = line.strip()
         if not line:
             continue
-        # Split into name and value, then join them with a single comma
+        # Split into name and value, plus an optional trailing flag
         parts = re.split(r"[\s,=]+", line)
-        if len(parts) != 2:
+        if len(parts) == 3 and parts[2] == "@READONLY":
+            name, value, flag = parts
+            # Combine name and value with a single comma, keep the flag suffix
+            line = f"{name},{value} {flag}"
+        elif len(parts) == 2:
+            name, value = parts
+            # Combine name and value with a single comma
+            line = f"{name},{value}"
+        else:
             raise SyntaxError(f"Invalid parameter line: '{line}'")
-        name, value = parts
-        # Combine name and value with a single comma
-        line = f"{name.strip()},{value.strip()}"
         stripped.append(line)
     return stripped
 
