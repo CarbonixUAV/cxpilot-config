@@ -75,7 +75,7 @@ GPS2_POS_X,-0.135
 GPS2_POS_Y,1.05
 ICE_ENABLE,1
 ICE_IDLE_DB,100
-ICE_IDLE_RPM,2400 # Should match IDL_LOW_RPM in ice-auto-warmup.lua
+ICE_IDLE_RPM,2400 # Should match IDL_LOW_RPM in ice-idle-manager.lua
 ICE_IDLE_SLEW,4
 ICE_OPTIONS,4
 ICE_RPM_CHAN,1

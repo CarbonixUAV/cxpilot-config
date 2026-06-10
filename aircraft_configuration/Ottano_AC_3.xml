@@ -173,8 +173,8 @@
             <destination_path>cx_vtol_info.lua</destination_path>
         </lua_script>
         <lua_script>
-            <source_path>scripts/engine/ice-auto-warmup.lua</source_path>
-            <destination_path>ice-auto-warmup.lua</destination_path>
+            <source_path>scripts/engine/ice-idle-manager.lua</source_path>
+            <destination_path>ice-idle-manager.lua</destination_path>
         </lua_script>
         <lua_script>
             <source_path>scripts/engine/engine-out.lua</source_path>
