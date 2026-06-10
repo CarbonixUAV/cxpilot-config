@@ -116,8 +116,8 @@ class AutoTestCarbonix(AutoTestQuadPlane):
             int(location.lng * 1e7),  # longitude
             location.alt)  # altitude
 
-    def prepare_engine(self, rapid_warmup=False):
-        '''Start the ICE engine, wait for warmup and runup'''
+    def start_engine(self):
+        '''Start the ICE engine and wait for it to be running.'''
         self.progress('Starting engine')
         self.set_rc(3, 1000)
         self.change_mode('MANUAL')
@@ -129,17 +129,23 @@ class AutoTestCarbonix(AutoTestQuadPlane):
         self.wait_rpm(1, 1000, 9000, timeout=10)
         self.progress('Engine started successfully')
 
-        self.progress('Waiting for engine warmup')
-        if rapid_warmup:
-            self.set_rc(3, 2000)
-        self.wait_for_engine_temp(idx=1, temp_min=120, temp_max=300, timeout=600)
-        self.wait_for_engine_temp(idx=2, temp_min=120, temp_max=300, timeout=600)
-
+    def engine_runup(self):
+        '''Rev the engine and bring it back to idle (required before arming).'''
         self.progress('Engine runup')
         self.set_rc(3, 2000)
         self.wait_rpm(1, 6500, 8000, timeout=10)
         self.set_rc(3, 1000)
         self.wait_rpm(1, 2000, 4000, timeout=10)
+
+    def prepare_engine(self, rapid_warmup=False):
+        '''Start the ICE engine, wait for warmup and runup'''
+        self.start_engine()
+        self.progress('Waiting for engine warmup')
+        if rapid_warmup:
+            self.set_rc(3, 2000)
+        self.wait_for_engine_temp(idx=1, temp_min=120, temp_max=300, timeout=600)
+        self.wait_for_engine_temp(idx=2, temp_min=120, temp_max=300, timeout=600)
+        self.engine_runup()
 
     def restore_fence_defaults(self):
         '''Restore fence parameters from the frame's defaults file.
@@ -592,6 +598,116 @@ class AutoTestCarbonix(AutoTestQuadPlane):
         self.change_mode('RTL')
         self.wait_disarmed(timeout=600)
 
+    def EngineIdleManagement(self):
+        '''Test the idle management in ice-auto-warmup.lua.
+
+        The script drives ICE_IDLE_RPM live: it commands IDL_FLT_RPM in forward
+        flight once warmed up (to keep the engine warm and the PMU generating),
+        and the low idle (IDL_LOW_RPM) during VTOL/hover phases, on the ground,
+        and until the engine is warm. The decision depends only on the flight
+        mode (quadplane:in_vtol_mode()), CHT, and arm state, so we drive the
+        modes directly on the ground rather than flying a full sortie.
+
+        We also confirm ICE_IDLE_RPM and IDL_LOW_RPM share a default: the
+        script restores ICE_IDLE_RPM to IDL_LOW_RPM when the engine is off, so
+        the governor's standalone idle and the script's low idle must match.
+        '''
+        if not self.get_parameter('ICE_ENABLE'):
+            self.progress('No ICE engine on this frame; skipping')
+            return
+
+        # Confirm the shipped ICE_IDLE_RPM default matches the script's low
+        # idle (IDL_LOW_RPM); they should be kept in sync to avoid confusion
+        # when diffing params with default during QC.
+        self.start_subtest('ICE_IDLE_RPM and IDL_LOW_RPM share a default')
+        shipped = mavparm.MAVParmDict()
+        defaults_path = self.model_defaults_filepath(str(self.frame))[0]
+        if not shipped.load(defaults_path):
+            raise ValueError(f"Failed to load {defaults_path}")
+        if 'ICE_IDLE_RPM' not in shipped:
+            raise NotAchievedException(f"ICE_IDLE_RPM not set in {defaults_path}")
+        ice_idle_default = shipped['ICE_IDLE_RPM']
+        idl_low_default = self.get_parameter('IDL_LOW_RPM', attempts=30, timeout=2)
+        if abs(ice_idle_default - idl_low_default) > 0.5:
+            raise NotAchievedException(
+                f"shipped ICE_IDLE_RPM ({ice_idle_default}) != "
+                f"IDL_LOW_RPM default ({idl_low_default}); keep them in sync")
+        
+        self.context_push()
+
+        # Reboot to get a stopped, cold engine
+        self.reboot_sitl()
+
+        # Set explicit, distinct RPMs and warmup thresholds, regardless of the
+        # default config, so each assertion below verifies the right parameter
+        # is used in each phase.
+        nominal_idle = 2400
+        warmup_rpm = 3400
+        flight_idle = 4000
+        mid_thresh = 60
+        warm_thresh = 90
+        # Tolerance for confirming the idle governor has settled at a setpoint.
+        rpm_margin = 100
+
+        self.set_parameters({
+            'IDL_LOW_RPM': nominal_idle,
+            'IDL_WRM_RPM': warmup_rpm,
+            'IDL_FLT_RPM': flight_idle,
+            'IDL_WRM_MIDTEMP': mid_thresh,
+            'IDL_WRM_ENDTEMP': warm_thresh,
+        })
+
+        # Start the engine cold and let it warm at idle
+        self.start_engine()
+
+        # Below the warmup mid temp: low idle
+        self.start_subtest('Cold engine (below mid temp) holds low idle')
+        self.wait_for_engine_temp(idx=1, temp_min=mid_thresh-15, temp_max=mid_thresh-5, timeout=60)
+        self.wait_for_engine_temp(idx=2, temp_min=mid_thresh-15, temp_max=mid_thresh-5, timeout=60)
+        self.wait_rpm(1, nominal_idle - rpm_margin, nominal_idle + rpm_margin, timeout=10)
+
+        # Between mid and end temp: the warmup RPM
+        self.start_subtest('Warming (mid to end temp) uses the warmup RPM')
+        self.wait_for_engine_temp(idx=1, temp_min=mid_thresh, timeout=60)
+        self.wait_for_engine_temp(idx=2, temp_min=mid_thresh, timeout=60)
+        self.wait_rpm(1, warmup_rpm - rpm_margin, warmup_rpm + rpm_margin, timeout=10)
+
+        # Above the warmup end temp: back to low idle
+        self.start_subtest('Warmed (above end temp) returns to low idle')
+        self.wait_for_engine_temp(idx=1, temp_min=warm_thresh, timeout=60)
+        self.wait_for_engine_temp(idx=2, temp_min=warm_thresh, timeout=60)
+        self.wait_rpm(1, nominal_idle - rpm_margin, nominal_idle + rpm_margin, timeout=10)
+
+        # Run up (also clears the runup prearm) and arm once warm.
+        self.engine_runup()
+        self.wait_ready_to_arm()
+
+        # Hover (warmed, armed, VTOL): low idle.
+        self.start_subtest('Warmed hover holds low idle')
+        self.change_mode('QHOVER')
+        self.arm_vehicle()
+        self.set_rc(3, 1000)
+        self.wait_rpm(1, nominal_idle - rpm_margin, nominal_idle + rpm_margin, timeout=10)
+
+        # Forward flight (warmed, armed, fixed-wing): flight idle.
+        self.start_subtest('Forward flight raises to flight idle')
+        self.change_mode('FBWA')
+        self.wait_rpm(1, flight_idle - rpm_margin, flight_idle + rpm_margin, timeout=10)
+
+        # Disarmed in fixed-wing: the flight idle only applies while armed, so
+        # the idle drops back to low even though we stay in a fixed-wing mode.
+        self.start_subtest('Disarmed in fixed-wing holds low idle')
+        self.disarm_vehicle(force=True)
+        self.wait_rpm(1, nominal_idle - rpm_margin, nominal_idle + rpm_margin, timeout=10)
+
+        # Engine off: the script restores the governor setpoint to the low idle.
+        self.start_subtest('Engine off restores the low idle setpoint')
+        self.run_cmd(mavutil.mavlink.MAV_CMD_DO_ENGINE_CONTROL, p1=0)
+        self.wait_rpm(1, 0, 300, timeout=30)
+        self.assert_parameter_value('ICE_IDLE_RPM', nominal_idle, epsilon=0.5)
+
+        self.context_pop()
+
     def _pretest_hook(self):
         self.install_terrain_handlers_context()
 
@@ -605,6 +721,7 @@ class AutoTestCarbonix(AutoTestQuadPlane):
     def _raw_tests(self) -> list[Any]:
         return [
             self.CX_BIT,
+            self.EngineIdleManagement,
             self.FenceTests,
         ]
 
