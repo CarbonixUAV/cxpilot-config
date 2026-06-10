@@ -599,7 +599,7 @@ class AutoTestCarbonix(AutoTestQuadPlane):
         self.wait_disarmed(timeout=600)
 
     def EngineIdleManagement(self):
-        '''Test the idle management in ice-auto-warmup.lua.
+        '''Test the idle management in ice-idle-manager.lua.
 
         The script drives ICE_IDLE_RPM live: it commands IDL_FLT_RPM in forward
         flight once warmed up (to keep the engine warm and the PMU generating),
