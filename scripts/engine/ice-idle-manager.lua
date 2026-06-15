@@ -39,7 +39,7 @@ local WARMUP_WARM = 2     -- reached IDL_WRM_ENDTEMP: back to low idle
 local warmup_phase = WARMUP_COLD
 
 -- Bind Param Utilities
-local PARAM_TABLE_KEY = 69
+local PARAM_TABLE_KEY = 70
 local PARAM_TABLE_PREFIX = "IDL_"
 local function bind_param(name)
     local p = Parameter()
