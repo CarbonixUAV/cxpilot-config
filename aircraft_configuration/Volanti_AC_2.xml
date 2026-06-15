@@ -19,7 +19,7 @@
             CAN GPS,
             CAN Airspeed
         </model_description>
-        <status>active</status>
+        <status>deprecated</status>
         <configuration_version>2</configuration_version>
     </aircraft>
     <flight_controller>

@@ -23,7 +23,7 @@
             CAN Battery Monitor,
             CAN Matek EIB
         </model_description>
-        <status>active</status>
+        <status>deprecated</status>
         <configuration_version>3</configuration_version>
     </aircraft>
     <flight_controller>
