@@ -179,6 +179,10 @@
             <destination_path>engine-out.lua</destination_path>
         </lua_script>
         <lua_script>
+            <source_path>scripts/engine/engine-hours.lua</source_path>
+            <destination_path>engine-hours.lua</destination_path>
+        </lua_script>
+        <lua_script>
             <source_path>scripts/modules/bit_esc.lua</source_path>
             <destination_path>modules/bit_esc.lua</destination_path>
         </lua_script>
