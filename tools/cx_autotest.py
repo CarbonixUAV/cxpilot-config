@@ -708,6 +708,120 @@ class AutoTestCarbonix(AutoTestQuadPlane):
 
         self.context_pop()
 
+    def EngineHourMeter(self):
+        '''Test the engine hour meter in engine-hours.lua.
+
+        The script accumulates run time into ENG_HOURS while the engine turns,
+        saving every 30 s of running and again when the engine stops. It owns
+        the value: a direct write to ENG_HOURS is reverted, and the only way to
+        load a new total is ENG_HRS_SET, which applies itself and resets to -1.
+        Until the hours and the serial number are set, the script warns every
+        25 s while disarmed so the checklist cannot miss them, and changing the
+        serial to another engine puts the hours back to unset.
+        '''
+        if not self.get_parameter('ICE_ENABLE'):
+            self.progress('No ICE engine on this frame; skipping')
+            return
+
+        # Tolerance for comparing ENG_HOURS readings: the parameter is a
+        # 32-bit float, and at a few hundred hours one count is ~0.1 s.
+        hours_epsilon = 0.5 / 3600
+
+        def wait_hours_above(floor, timeout):
+            '''Wait for ENG_HOURS to exceed floor and return the new reading.'''
+            tstart = self.get_sim_time()
+            while True:
+                hours = self.get_parameter('ENG_HOURS', verbose=False)
+                if hours > floor + hours_epsilon:
+                    return hours
+                if self.get_sim_time_cached() - tstart > timeout:
+                    raise NotAchievedException(
+                        f"ENG_HOURS never rose above {floor:.4f} (got {hours:.4f})")
+                self.delay_sim_time(1)
+
+        # Wait for the script to load and register its parameters.
+        self.get_parameter('ENG_HOURS', attempts=30, timeout=2)
+
+        self.start_subtest('Unset hours and serial are nagged while disarmed')
+        self.assert_parameter_value('ENG_HOURS', -1)
+        self.assert_parameter_value('ENG_SERIAL', 0)
+        self.context_collect('STATUSTEXT')
+        self.wait_statustext('Engine hour meter not set', check_context=True, timeout=30)
+        self.context_stop_collecting('STATUSTEXT')
+
+        # Setting the serial for the first time must not touch the hours, and
+        # with the hours still unset the nag must continue on its own.
+        self.start_subtest('Nag continues until the hours are set too')
+        self.set_parameter('ENG_SERIAL', 4103)
+        self.wait_statustext('Engine hour meter not set', timeout=30)
+        self.assert_parameter_value('ENG_HOURS', -1)
+
+        # Seed through the setter. Use a direct send: set_parameter would
+        # fight the script, which resets ENG_HRS_SET as soon as it applies it.
+        self.start_subtest('ENG_HRS_SET loads the meter and clears itself')
+        seed = 123.5
+        self.send_set_parameter_direct('ENG_HRS_SET', seed)
+        self.wait_parameter_value('ENG_HOURS', seed, timeout=10)
+        self.wait_parameter_value('ENG_HRS_SET', -1, timeout=10)
+
+        self.start_subtest('Direct writes to ENG_HOURS are reverted')
+        self.context_collect('STATUSTEXT')
+        self.send_set_parameter_direct('ENG_HOURS', 5)
+        self.wait_statustext('ENG_HOURS is read-only', check_context=True, timeout=10)
+        self.wait_parameter_value('ENG_HOURS', seed, timeout=10)
+        self.context_stop_collecting('STATUSTEXT')
+
+        # A quiet 30 s (the 25 s period plus margin) proves the nag stopped.
+        self.start_subtest('Nag stops once both are set')
+        self.assert_no_text('Engine hour meter not set', timeout=30)
+
+        # A different engine: the old hours must not carry over to it.
+        self.start_subtest('Changing the serial puts the hours back to unset')
+        self.context_collect('STATUSTEXT')
+        self.set_parameter('ENG_SERIAL', 4104)
+        self.wait_statustext('hours reset', check_context=True, timeout=10)
+        self.wait_parameter_value('ENG_HOURS', -1, timeout=10)
+        self.wait_statustext('Engine hour meter not set', check_context=True, timeout=30)
+        self.context_stop_collecting('STATUSTEXT')
+        self.send_set_parameter_direct('ENG_HRS_SET', seed)
+        self.wait_parameter_value('ENG_HOURS', seed, timeout=10)
+
+        # The first save lands 30 s after the engine starts turning, and the
+        # meter cannot have gained more than the sim time that has passed.
+        self.start_subtest('Hours accrue while the engine runs')
+        tstart = self.get_sim_time()
+        self.start_engine()
+        hours = wait_hours_above(seed, timeout=60)
+        elapsed = self.get_sim_time() - tstart
+        gained = (hours - seed) * 3600
+        if not 25 <= gained <= elapsed:
+            raise NotAchievedException(
+                f"ENG_HOURS gained {gained:.1f} s in {elapsed:.1f} s of running")
+
+        # Let some unsaved run time build up, then stop the engine: the stop
+        # must save it well before the periodic 30 s save would have.
+        self.start_subtest('Stopping the engine saves the unsaved run time')
+        self.delay_sim_time(5)
+        self.run_cmd(mavutil.mavlink.MAV_CMD_DO_ENGINE_CONTROL, p1=0)
+        self.wait_rpm(1, 0, 300, timeout=30)
+        # The save lands on the script's next 1 Hz tick after the RPM drops.
+        self.delay_sim_time(3)
+        stopped = self.get_parameter('ENG_HOURS')
+        if stopped <= hours + hours_epsilon:
+            raise NotAchievedException(
+                f"ENG_HOURS not saved on engine stop ({hours:.4f} -> {stopped:.4f})")
+
+        self.start_subtest('A stopped engine accrues nothing')
+        self.delay_sim_time(35)
+        self.assert_parameter_value('ENG_HOURS', stopped, epsilon=hours_epsilon)
+
+        self.start_subtest('Hours persist across a reboot')
+        self.reboot_sitl()
+        rebooted = self.get_parameter('ENG_HOURS', attempts=30, timeout=2)
+        if abs(rebooted - stopped) > hours_epsilon:
+            raise NotAchievedException(
+                f"ENG_HOURS was {stopped:.4f} before reboot, {rebooted:.4f} after")
+
     def _pretest_hook(self):
         self.install_terrain_handlers_context()
 
@@ -722,6 +836,7 @@ class AutoTestCarbonix(AutoTestQuadPlane):
         return [
             self.CX_BIT,
             self.EngineIdleManagement,
+            self.EngineHourMeter,
             self.FenceTests,
         ]
 
