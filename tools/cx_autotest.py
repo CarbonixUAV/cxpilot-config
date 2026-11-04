@@ -749,6 +749,14 @@ class AutoTestCarbonix(AutoTestQuadPlane):
             self.assert_parameter_values({name: expected[name] for name in meters},
                                          epsilon=hours_epsilon)
 
+        # SITL frames exclude the script, or its nag would fire in every
+        # session, so install it for this test only. Registering it with the
+        # context removes it even if the test fails part way.
+        script = 'engine-hours.lua'
+        self.install_script(CXPILOT_CONFIG_ROOT / 'scripts' / 'engine' / script, script)
+        self.context_get().installed_scripts.append(script)
+        self.reboot_sitl()
+
         # Wait for the script to load and register its parameters.
         self.get_parameter('ENG_AF_HOURS', attempts=30, timeout=2)
 
@@ -849,6 +857,11 @@ class AutoTestCarbonix(AutoTestQuadPlane):
         self.reboot_sitl()
         self.get_parameter('ENG_AF_HOURS', attempts=30, timeout=2)
         assert_meters(second)
+
+        # Removing the file doesn't stop the running script, so reboot it out
+        # before the next test shares this SITL.
+        self.remove_installed_script(script)
+        self.reboot_sitl()
 
     def _pretest_hook(self):
         self.install_terrain_handlers_context()

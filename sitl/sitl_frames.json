@@ -6,6 +6,9 @@
     "scripts": [
       "sitl/scripts/sitl_engine.lua",
       "sitl/scripts/sitl_escs.lua"
+    ],
+    "exclude_scripts": [
+      "engine-hours.lua"
     ]
   },
   "ottano-realflight": {
@@ -15,6 +18,9 @@
     "scripts": [
       "sitl/scripts/sitl_engine.lua",
       "sitl/scripts/sitl_escs.lua"
+    ],
+    "exclude_scripts": [
+      "engine-hours.lua"
     ],
     "external": true
   },
