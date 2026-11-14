@@ -5,7 +5,8 @@
     "base_aircraft_config": "Ottano_AC_2",
     "scripts": [
       "sitl/scripts/sitl_engine.lua",
-      "sitl/scripts/sitl_escs.lua"
+      "sitl/scripts/sitl_escs_ottano.lua",
+      ["sitl/scripts/modules/sitl_esc_sim.lua", "modules"]
     ]
   },
   "ottano-realflight": {
@@ -14,7 +15,8 @@
     "base_aircraft_config": "Ottano_AC_3",
     "scripts": [
       "sitl/scripts/sitl_engine.lua",
-      "sitl/scripts/sitl_escs.lua"
+      "sitl/scripts/sitl_escs_ottano.lua",
+      ["sitl/scripts/modules/sitl_esc_sim.lua", "modules"]
     ],
     "external": true
   },
@@ -23,7 +25,8 @@
     "defaults": "sitl/params/volanti-headless.parm",
     "base_aircraft_config": "Volanti_AC_3",
     "scripts": [
-      "sitl/scripts/sitl_escs.lua"
+      "sitl/scripts/sitl_escs_volanti.lua",
+      ["sitl/scripts/modules/sitl_esc_sim.lua", "modules"]
     ]
   },
   "volanti-realflight": {
@@ -31,7 +34,8 @@
     "defaults": "sitl/params/volanti-realflight.parm",
     "base_aircraft_config": "Volanti_AC_3",
     "scripts": [
-      "sitl/scripts/sitl_escs.lua"
+      "sitl/scripts/sitl_escs_volanti.lua",
+      ["sitl/scripts/modules/sitl_esc_sim.lua", "modules"]
     ],
     "external": true
   }
