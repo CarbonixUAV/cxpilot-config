@@ -6,7 +6,9 @@
     "scripts": [
       "sitl/scripts/sitl_engine.lua",
       "sitl/scripts/sitl_escs_ottano.lua",
-      ["sitl/scripts/modules/sitl_esc_sim.lua", "modules"]
+      "sitl/scripts/sitl_power.lua",
+      ["sitl/scripts/modules/sitl_esc_sim.lua", "modules"],
+      ["sitl/scripts/modules/sitl_pack.lua", "modules"]
     ]
   },
   "ottano-realflight": {
@@ -16,7 +18,9 @@
     "scripts": [
       "sitl/scripts/sitl_engine.lua",
       "sitl/scripts/sitl_escs_ottano.lua",
-      ["sitl/scripts/modules/sitl_esc_sim.lua", "modules"]
+      "sitl/scripts/sitl_power.lua",
+      ["sitl/scripts/modules/sitl_esc_sim.lua", "modules"],
+      ["sitl/scripts/modules/sitl_pack.lua", "modules"]
     ],
     "external": true
   },

@@ -8,17 +8,21 @@ ARSPD2_OFFSET,2013
 ARSPD2_PIN,2
 ARSPD2_TYPE,2
 BATT_OPTIONS,0 # Disable reporting sag corrected voltage, because it already is (due to RF bug)
-# Delete unsimulated monitors
-@delete BATT2_*
-@delete BATT3_*
-@delete BATT6_*
+# AVBAT (2) and the bus (6, 7) come from sitl_power.lua through the scripting
+# backend; their failsafes stay as is
+@delete BATT2_MONITOR
+@delete BATT2_SERIAL_NUM
+BATT2_MONITOR,29
+@delete BATT3_* # Fuel level isn't simulated
+@delete BATT6_AMP_*
+@delete BATT6_*_PIN
+@delete BATT6_MONITOR
+@delete BATT6_VOLT_MULT
+BATT6_MONITOR,29
 @delete BATT7_*
+BATT7_MONITOR,29
 @delete BATT8_*
 @delete BATT9_*
-# BATT2_MONITOR,29 # Avionics battery
-# BATT3_MONITOR,29 # fuel level
-# BATT6_MONITOR,29 # 28V bus
-# BATT7_MONITOR,29 # 28V bus
 # Batt9 serves to pass the SITL battery info into the ESC lua script
 BATT9_MONITOR,4
 @delete CAN_*
