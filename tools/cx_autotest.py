@@ -7,6 +7,7 @@ import sys
 import shutil
 import argparse
 import functools
+import statistics
 from typing import Any, Callable, Optional, Union
 from pathlib import Path
 from pymavlink import mavparm, mavutil
@@ -183,6 +184,89 @@ class AutoTestCarbonix(AutoTestQuadPlane):
 
     def wait_not_ready_to_arm(self, timeout=5):
         self.wait_sensor_state(mavutil.mavlink.MAV_SYS_STATUS_PREARM_CHECK, True, True, False, timeout=timeout)
+
+    def has_parameter(self, name):
+        '''Return whether the vehicle has a parameter, such as one a SITL script adds.'''
+        try:
+            self.get_parameter(name, attempts=2, timeout=2, verbose=False)
+        except NotAchievedException:
+            return False
+        return True
+
+    @staticmethod
+    def battery_status_voltage(m):
+        '''Return the pack voltage a BATTERY_STATUS reports.
+
+        ArduPilot spreads a voltage it has no cells for across the cell
+        fields, 65.534 V at most each.
+        '''
+        cells = [v for v in m.voltages if v != 65535]
+        cells += [v for v in (getattr(m, 'voltages_ext', None) or []) if v not in (0, 65535)]
+        return sum(cells) * 0.001
+
+    @staticmethod
+    def robust_spread(values):
+        '''Return a standard deviation that a few outliers can't inflate.
+
+        It is the median absolute deviation, scaled to the standard deviation
+        of normally distributed values.
+        '''
+        med = statistics.median(values)
+        return 1.4826 * statistics.median(abs(v - med) for v in values)
+
+    def battery_samples(self, batt, duration):
+        '''Collect the voltages and currents BATTn reports over a period.
+
+        Args:
+            batt (int): Monitor number as in the parameter names (BATT2 is 2).
+            duration (float): Sim seconds to collect for.
+
+        Returns:
+            tuple[list[float], list[float]]: Voltages (V) and currents (A).
+        '''
+        volts, amps = [], []
+        tstart = self.get_sim_time()
+        while self.get_sim_time_cached() - tstart < duration:
+            m = self.mav.recv_match(type='BATTERY_STATUS', blocking=True, timeout=1)
+            if m is None or m.id != batt - 1:
+                continue
+            volts.append(self.battery_status_voltage(m))
+            amps.append(m.current_battery * 0.01)
+        if len(volts) < 2:
+            raise NotAchievedException(f'Too few BATTERY_STATUS messages for BATT{batt}')
+        return volts, amps
+
+    def battery_voltage(self, batt, duration=2):
+        '''Return the mean voltage BATTn reports over a period.'''
+        return statistics.mean(self.battery_samples(batt, duration)[0])
+
+    def wait_battery_voltage(self, batt, v_min, v_max, timeout=30):
+        '''Wait for BATTn's mean voltage over 1 s to come within a range.'''
+        tstart = self.get_sim_time()
+        while True:
+            v = self.battery_voltage(batt, duration=1)
+            self.progress(f'BATT{batt}: {v:.2f} V (want {v_min:.2f} to {v_max:.2f})')
+            if v_min <= v <= v_max:
+                return v
+            if self.get_sim_time_cached() - tstart > timeout:
+                raise NotAchievedException(f'BATT{batt} at {v:.2f} V, want {v_min:.2f} to {v_max:.2f}')
+
+    def set_sim_charge(self, param_name, pct):
+        '''Set a simulated pack's charge through its SIM_*_SOC parameter.
+
+        Checks the parameter reads back -1 once applied; the caller confirms
+        the charge took by the voltage.
+        '''
+        # Not set_parameter: the script writes -1 back at once, so it can't
+        # confirm the write
+        self.send_set_parameter_direct(param_name, pct)
+        self.delay_sim_time(1)
+        self.assert_parameter_value(param_name, -1)
+
+    def reset_sim_packs(self):
+        '''Put every simulated pack back to its starting charge by changing SIM_PWR_RESET.'''
+        self.set_parameter('SIM_PWR_RESET', self.get_parameter('SIM_PWR_RESET') + 1, add_to_context=False)
+        self.delay_sim_time(1)
 
     def wait_for_engine_temp(self, idx=1, is_cht=True, temp_min=-280, temp_max=6000, timeout=10):
         """
@@ -708,6 +792,161 @@ class AutoTestCarbonix(AutoTestQuadPlane):
 
         self.context_pop()
 
+    def AvionicsPower(self):
+        '''Test the simulated avionics power: AVBAT (BATT2) and the bus (BATT6, BATT7).
+
+        The PMU boosts from AVBAT below the generator's cut-in RPM and
+        generates above it; cranking sags AVBAT; the injects fail the PMU or
+        the generator, and set AVBAT's charge.
+        '''
+        if not self.has_parameter('SIM_PWR_CUTIN'):
+            self.progress('No simulated avionics power on this frame; skipping')
+            return
+
+        # Start from a stopped engine, full packs and no latched failsafes
+        self.reboot_sitl()
+        # Fast enough to see every 10 Hz update of each monitor: the crank's
+        # bus dip lasts about 0.3 s
+        self.context_set_message_rate_hz(mavutil.mavlink.MAVLINK_MSG_ID_BATTERY_STATUS, 100)
+        cutin = self.get_parameter('SIM_PWR_CUTIN')
+        cut_hys = self.get_parameter('SIM_PWR_CUT_HYS')
+
+        self.start_subtest('Engine stopped: the PMU boosts from AVBAT')
+        bus, bkp_amps = self.battery_samples(6, 5)
+        _, pri_amps = self.battery_samples(7, 5)
+        avbat, avbat_amps = self.battery_samples(2, 3)
+        self.progress(f'bus {statistics.mean(bus):.2f} V (std {statistics.stdev(bus):.3f}), '
+                      f'BATT6 {statistics.mean(bkp_amps):.2f} A, BATT7 {statistics.mean(pri_amps):.2f} A, '
+                      f'AVBAT {statistics.mean(avbat):.2f} V {statistics.mean(avbat_amps):.3f} A')
+        if not 27.0 < statistics.mean(bus) < 27.7 or statistics.stdev(bus) > 0.12:
+            raise NotAchievedException('Bus not at the smooth boosting level')
+        if not 2.5 < statistics.mean(pri_amps) < 4.0:
+            raise NotAchievedException('BATT7 does not carry the board load')
+        if not 0 < statistics.mean(bkp_amps) < 0.3:
+            raise NotAchievedException('BATT6 shows the backup conducting')
+        if not 23.8 < statistics.mean(avbat) < 25.1:
+            raise NotAchievedException('AVBAT not at a full pack under the boost load')
+        if abs(statistics.mean(avbat_amps)) > 0.05:
+            raise NotAchievedException('BATT2 current should read about zero')
+
+        self.start_subtest('Setting and resetting AVBAT charge')
+        self.set_sim_charge('SIM_PWR_AVB_SOC', 40)
+        self.wait_battery_voltage(2, 21.0, 22.8, timeout=5)
+        self.reset_sim_packs()
+        self.wait_battery_voltage(2, 23.8, 25.1, timeout=5)
+
+        self.start_subtest('Cranking sags AVBAT and drops the PMU out, and nothing generates')
+        self.context_collect('BATTERY_STATUS')
+        self.start_engine()
+        self.delay_sim_time(8)
+        msgs = self.context_collection('BATTERY_STATUS')
+        self.context_stop_collecting('BATTERY_STATUS')
+        avbat = [self.battery_status_voltage(m) for m in msgs if m.id == 1]
+        bus = [self.battery_status_voltage(m) for m in msgs if m.id == 5]
+        bkp_amps = [m.current_battery * 0.01 for m in msgs if m.id == 5]
+        self.progress(f'AVBAT low {min(avbat):.2f} V, now {avbat[-1]:.2f} V; bus low {min(bus):.2f} V, '
+                      f'now {bus[-1]:.2f} V; backup peak {max(bkp_amps):.2f} A')
+        if min(avbat) > 19.5 or avbat[-1] < 23.5:
+            raise NotAchievedException('AVBAT did not sag while cranking and recover')
+        if min(bus) > 26.5 or bus[-1] < 27.0:
+            raise NotAchievedException('The bus did not dip while cranking and recover')
+        if max(bkp_amps) < 1.0:
+            raise NotAchievedException('The backup did not hold the bus while cranking')
+        # The starter stays on for ICE_STARTER_TIME, and in SITL the engine
+        # runs above the cut-in RPM meanwhile; the PMU must not generate. The
+        # dip's recovery (or a second crank's) would inflate a plain standard
+        # deviation, so take a robust one: boosting reads about 0.06 V,
+        # generating at least 0.15 V
+        steady = [v for v in bus if v > 26.5]
+        spread = self.robust_spread(steady)
+        self.progress(f'bus spread outside the dip {spread:.3f}')
+        if spread > 0.12:
+            raise NotAchievedException('Generating ripple on the bus while the starter ran')
+
+        self.start_subtest('The generator cuts in above the cut-in RPM')
+        self.wait_rpm(1, 1000, cutin - cut_hys - 50, timeout=20)
+        self.delay_sim_time(40)  # let AVBAT's polarization settle under the boost
+        v_boosting = self.battery_voltage(2)
+        self.set_rc(3, 1600)
+        self.wait_rpm(1, cutin + 300, 9000, timeout=10)
+        v_cut_in = self.battery_voltage(2, duration=1)
+        self.delay_sim_time(40)
+        v_recovered = self.battery_voltage(2)
+        bus, _ = self.battery_samples(6, 5)
+        self.progress(f'AVBAT boosting {v_boosting:.3f} V, at cut-in {v_cut_in:.3f} V, '
+                      f'after 40 s {v_recovered:.3f} V; bus {statistics.mean(bus):.2f} V '
+                      f'(std {statistics.stdev(bus):.3f})')
+        if v_cut_in - v_boosting < 0.12:
+            raise NotAchievedException('AVBAT did not step up when the generator cut in')
+        if v_recovered - v_cut_in < 0.08:
+            raise NotAchievedException('AVBAT did not keep recovering after the cut-in')
+        if statistics.stdev(bus) < 0.15 or not 26.7 < statistics.mean(bus) < 27.4:
+            raise NotAchievedException('No generating ripple on the bus')
+        self.set_rc(3, 1000)
+        self.wait_rpm(1, 1000, cutin - cut_hys - 50, timeout=20)
+        v_dropped_out = self.battery_voltage(2, duration=1)
+        self.progress(f'AVBAT after drop-out {v_dropped_out:.3f} V')
+        if v_recovered - v_dropped_out < 0.12:
+            raise NotAchievedException('AVBAT did not step down when the generator dropped out')
+
+        self.start_subtest('A generator fault keeps AVBAT draining')
+        self.set_rc(3, 1600)
+        self.wait_rpm(1, cutin + 300, 9000, timeout=10)
+        self.set_parameter('SIM_PWR_FAIL', 2)
+        self.delay_sim_time(30)
+        v_start = self.battery_voltage(2)
+        self.delay_sim_time(120)
+        v_end = self.battery_voltage(2)
+        bus, _ = self.battery_samples(6, 5)
+        self.progress(f'AVBAT {v_start:.3f} V to {v_end:.3f} V over 120 s at cruise RPM; '
+                      f'bus std {statistics.stdev(bus):.3f}')
+        if v_start - v_end < 0.06:
+            raise NotAchievedException('AVBAT did not drain with the generator faulted')
+        if statistics.stdev(bus) > 0.12:
+            raise NotAchievedException('Bus ripple with the generator faulted')
+        self.set_parameter('SIM_PWR_FAIL', 0)
+        self.wait_battery_voltage(2, v_end + 0.12, 26, timeout=5)
+        self.set_rc(3, 1000)
+
+        self.start_subtest('A PMU failure drops the bus to the batteries and BATT6 RTLs')
+        self.context_push()
+        self.context_collect('STATUSTEXT')
+        # The engine is already running: warm it and run it up to arm
+        self.set_rc(3, 2000)
+        self.wait_for_engine_temp(idx=1, temp_min=120, temp_max=300, timeout=600)
+        self.wait_for_engine_temp(idx=2, temp_min=120, temp_max=300, timeout=600)
+        self.engine_runup()
+        self.wait_ready_to_arm()
+        self.change_mode('FBWA')
+        self.arm_vehicle()
+        strt_pin = self.get_parameter('SIM_ICE_STRT_PIN')
+        self.set_parameter('SIM_PWR_FAIL', 1)
+        self.wait_battery_voltage(6, 20, 25, timeout=5)
+        t_low = self.get_sim_time()
+        _, bkp_amps = self.battery_samples(6, 2)
+        _, pri_amps = self.battery_samples(7, 2)
+        self.assert_parameter_value('SIM_ICE_STRT_PIN', -1)
+        self.wait_text('Battery 6 is low', timeout=20, check_context=True)
+        t_text = self.get_sim_time() - t_low
+        tstart = self.get_sim_time()
+        while not (self.mode_is('RTL') or self.mode_is('QRTL')):
+            if self.get_sim_time_cached() - tstart > 5:
+                raise NotAchievedException('No RTL after Battery 6 low')
+        self.disarm_vehicle(force=True)
+        self.progress(f'Battery 6 low {t_text:.1f} s after the bus fell; backup {statistics.mean(bkp_amps):.2f} A, '
+                      f'AVBAT {statistics.mean(pri_amps):.2f} A')
+        if not 7 < t_text < 14:
+            raise NotAchievedException('Battery 6 low failsafe not about 10 s after the bus fell')
+        if statistics.mean(bkp_amps) + statistics.mean(pri_amps) < 2.5:
+            raise NotAchievedException("The batteries aren't carrying the board")
+        self.set_parameter('SIM_PWR_FAIL', 0)
+        self.assert_parameter_value('SIM_ICE_STRT_PIN', strt_pin)
+        self.wait_battery_voltage(6, 27.0, 27.7, timeout=5)
+        self.context_pop()
+
+        # Clear the latched battery failsafe
+        self.reboot_sitl()
+
     def _pretest_hook(self):
         self.install_terrain_handlers_context()
 
@@ -723,6 +962,7 @@ class AutoTestCarbonix(AutoTestQuadPlane):
             self.CX_BIT,
             self.EngineIdleManagement,
             self.FenceTests,
+            self.AvionicsPower,
         ]
 
     def tests(self) -> list[Any]:
