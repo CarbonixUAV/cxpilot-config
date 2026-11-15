@@ -1061,6 +1061,53 @@ class AutoTestCarbonix(AutoTestQuadPlane):
         # Clear the latched battery failsafe
         self.reboot_sitl()
 
+    def FuelPressure(self):
+        '''Test the simulated fuel pressure (BATT8, kPa in the voltage field).'''
+        if not self.has_parameter('SIM_ICE_FP_NOM'):
+            self.progress('No simulated fuel pressure on this frame; skipping')
+            return
+
+        # A stopped engine, from power-up (the pump primes)
+        self.reboot_sitl()
+        self.context_set_message_rate_hz(mavutil.mavlink.MAVLINK_MSG_ID_BATTERY_STATUS, 50)
+        nominal = self.get_parameter('SIM_ICE_FP_NOM')
+        held = nominal - 38
+
+        self.start_subtest('The line holds pressure with the pump off')
+        self.wait_battery_voltage(8, held - 2, held + 3, timeout=60)
+
+        self.start_subtest('Idle: about the nominal pressure')
+        self.start_engine()
+        self.wait_battery_voltage(8, nominal - 3, nominal + 2, timeout=15)
+
+        self.start_subtest('Full throttle: it droops with fuel flow')
+        self.set_rc(3, 2000)
+        self.wait_rpm(1, 6500, 8000, timeout=10)
+        self.wait_battery_voltage(8, nominal - 20, nominal - 8, timeout=10)
+        self.set_rc(3, 1000)
+
+        self.start_subtest('A lower nominal moves the reading only')
+        lowered = nominal - 70
+        self.set_parameter('SIM_ICE_FP_NOM', lowered)
+        self.wait_battery_voltage(8, lowered - 3, lowered + 2, timeout=10)
+        self.set_rc(3, 2000)
+        self.wait_rpm(1, 6500, 8000, timeout=10)
+        self.wait_battery_voltage(8, lowered - 20, lowered - 8, timeout=10)
+        self.set_rc(3, 1000)
+        self.wait_rpm(1, 1000, 4000, timeout=10)
+
+        self.start_subtest('Engine stop: it falls to the held pressure')
+        self.run_cmd(mavutil.mavlink.MAV_CMD_DO_ENGINE_CONTROL, p1=0)
+        self.wait_rpm(1, 0, 300, timeout=30)
+        self.delay_sim_time(2)
+        v = self.battery_voltage(8, duration=1)
+        self.progress(f'2 s after the stop: {v:.2f} kPa')
+        if v > lowered - 15:
+            raise NotAchievedException('Fuel pressure did not drop fast after the stop')
+        self.wait_battery_voltage(8, lowered - 38 - 2, lowered - 38 + 3, timeout=60)
+        self.set_parameter('SIM_ICE_FP_NOM', nominal)
+        self.wait_battery_voltage(8, held - 2, held + 3, timeout=10)
+
     def _pretest_hook(self):
         self.install_terrain_handlers_context()
 
@@ -1078,6 +1125,7 @@ class AutoTestCarbonix(AutoTestQuadPlane):
             self.EngineHourMeter,
             self.FenceTests,
             self.AvionicsPower,
+            self.FuelPressure,
         ]
 
     def tests(self) -> list[Any]:
