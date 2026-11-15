@@ -10,21 +10,28 @@ at a fixed inflow: RealFlight raises the throttle about 1.19 times to climb at
 2.2 m/s, making up for the inflow rather than for more thrust, and thrust^1.5
 overstated that climb by 20%. In proportion, RealFlight's vertical climb and
 descent come within 2% of O16 log 52's (8.85 kW and 6.99 kW per pack).
+
+The packs' sag is emulated in the physics (emulates_sag): each motor's output
+is scaled by its pack's voltage, as an ESC's duty cycle is, so the thrust
+falls away as a pack runs down.
 --]]
 
 local vtol_power = {}
 
 -- RealFlight's Ottano hovers on this much of full thrust, as delivered, at
 -- AutoTest Hill: what puts its hover power, interpolated from a vertical
--- climb and descent, at O16 log 52's (2026-11-15).
+-- climb and descent, at O16 log 52's (2026-11-15, with the sag emulated).
 -- If RealFlight's model changes, measure it again the same way: the
 -- RealFlight PowerModel autotest flies the climb and descent.
 -- Q_M_THST_HOVER can't stand in for it: it's in the domain of ArduPilot's
 -- collective throttle, which runs about 13% under the motors' outputs
 -- (ArduPilot's compensation for the battery voltage and the air density, and
--- its mixing). Learning it in flight read low: the hovers an AUTO mission
--- offers are in the landing, decelerating or descending slowly.
+-- its mixing), and with the sag emulated it shifts with the sag. Learning it
+-- in flight read low: the hovers an AUTO mission offers are in the landing,
+-- decelerating or descending slowly.
 local HOVER_THRUST = 0.40
+
+vtol_power.emulates_sag = true
 
 ---@param hover_power number -- W, one motor at the hover thrust
 ---@param max_ratio number -- the most a motor draws, as a multiple of hover_power

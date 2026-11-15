@@ -104,7 +104,20 @@ function esc_sim.new(c)
         return temp * (1 - decay_factor) + temp_steady * decay_factor
     end
 
-    local function get_output_scaled(servo_func)
+    local function to_actuator(pwm)
+        local actuator = (pwm - Q_M_PWM_MIN) / (Q_M_PWM_MAX - Q_M_PWM_MIN)
+        return math.min(1, math.max(0, actuator))
+    end
+
+    ---A servo function's output as an actuator fraction (0 to 1), as it
+    ---reaches the physics model: SIM_ENGINE_MUL applied as SITL applies it.
+    ---Also the same output scaled by supply_ratio, as sim:set_servo_scale
+    ---applies it after that.
+    ---@param servo_func integer
+    ---@param supply_ratio number
+    ---@return number|nil -- actuator, or nil if the output couldn't be read
+    ---@return number|nil -- actuator with supply_ratio applied
+    local function get_output_scaled(servo_func, supply_ratio)
         local pwm = SRV_Channels:get_output_pwm(servo_func)
         local chan = SRV_Channels:find_channel(servo_func)
         -- An occasional race condition can cause either of these to return nil
@@ -115,8 +128,7 @@ function esc_sim.new(c)
         if SIM_ENGINE_FAIL:get() & (1 << chan) ~= 0 then
             pwm = 1000 + (pwm - 1000) * SIM_ENGINE_MUL:get()
         end
-        local actuator = (pwm - Q_M_PWM_MIN) / (Q_M_PWM_MAX - Q_M_PWM_MIN)
-        return math.min(1, math.max(0, actuator))
+        return to_actuator(pwm), to_actuator(1000 + (pwm - 1000) * supply_ratio)
     end
 
     -- ESCs detected from the servo functions; ESC telemetry index i
@@ -126,7 +138,8 @@ function esc_sim.new(c)
     local function new_esc(servo_func)
         local esc = {}
         esc.servo_func = servo_func
-        esc.motor_thrust = 0 -- fraction of full thrust, without battery compensation
+        esc.motor_thrust = 0 -- fraction of full thrust, without battery compensation, as delivered
+        esc.supply_ratio = 1 -- the output reaching the physics is scaled by this (see sim:set_servo_scale)
         esc.thrust = 0
         esc.rpm = 0
         esc.current = 0      -- what the ESC reports, noise included
@@ -157,9 +170,9 @@ function esc_sim.new(c)
     ---Work out each ESC's thrust and RPM from its output.
     function self.update_thrust()
         for _, esc in ipairs(self.escs) do
-            local actuator = get_output_scaled(esc.servo_func)
+            local actuator, delivered = get_output_scaled(esc.servo_func, esc.supply_ratio)
             if actuator then -- keep the old thrust value if the get_output race condition hits this iteration
-                esc.motor_thrust = motor_thrust(actuator)
+                esc.motor_thrust = motor_thrust(delivered)
                 esc.thrust = motors:actuator_to_thrust(actuator)
                 -- Add the small amount of thrust from the motor spinning at min
                 esc.thrust = esc.thrust * (1 - (MIN_RPM / MAX_RPM)^2) + math.min(actuator, Q_M_SPIN_ARM)*(MIN_RPM / MAX_RPM)^2/Q_M_SPIN_ARM

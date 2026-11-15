@@ -11,6 +11,8 @@ and recover after; the numbers aren't meant to match the aircraft's.
 
 local vtol_power = {}
 
+vtol_power.emulates_sag = false
+
 ---@param hover_power number -- W, one motor at the hover thrust
 ---@return table
 function vtol_power.new(hover_power)

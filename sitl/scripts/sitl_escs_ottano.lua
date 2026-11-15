@@ -15,10 +15,13 @@ aircraft's do. ArduPilot's resistance estimate learns from that noise before
 takeoff, as on the aircraft; without it, the estimate starts the first
 takeoff at zero and the sag-compensated voltage trips the failsafes.
 
-The physics doesn't see the modeled sag: RealFlight and SIM_Battery compute
-thrust from their own voltage. Their battery (BATT9) is read only to warn when
-RealFlight isn't set to unlimited fuel: it has no mixed power, so without that
-its electric pusher drains the battery the VTOL motors fly on.
+Where the power module emulates the sag, each motor's output reaches the
+physics scaled by its pack's voltage (sim:set_servo_scale), as an ESC's duty
+cycle is, so the thrust falls away as a pack runs down; otherwise the physics
+computes thrust from its own voltage. The physics backend's battery (BATT9) is
+read only to warn when RealFlight isn't set to unlimited fuel: it has no mixed
+power, so without that its electric pusher drains the battery the VTOL motors
+fly on.
 
 Injects: SIM_ESC_* (telemetry failure, overheat), SIM_VTB_* (set a pack's
 charge, resistance multiplier), and SIM_PWR_RESET (owned by sitl_power.lua),
@@ -116,6 +119,9 @@ local REST_CURRENT_NOISE = 0.12 -- A std
 -- RealFlight holds its battery at 50.4 V with unlimited fuel, and the headless
 -- model's battery is unlimited, so falling this far means it's draining
 local PHYSICS_BATT_LOW = 42 -- V
+-- Sag emulation scales each motor's output by its pack's voltage over this:
+-- what RealFlight's battery holds with unlimited fuel, and a full pack's
+local FULL_PACK_VOLTAGE = 50.4 -- V
 local PHYSICS_BATT_LOW_MS = 5000 -- it must stay low this long before the warning
 local PHYSICS_BATT_WARN_MS = 10000 -- between warnings
 
@@ -253,6 +259,16 @@ local function update()
         -- estimate, which works on the reported current and voltage, reads low
         p.voltage = p.model.terminal_voltage(p.reported_current)
         p.model.step(p.current, dt)
+    end
+
+    if vtol_power.emulates_sag then
+        for i, esc in ipairs(escs.escs) do
+            esc.supply_ratio = math.min(math.max(pack_of[i].voltage / FULL_PACK_VOLTAGE, 0), 1)
+            local chan = SRV_Channels:find_channel(esc.servo_func)
+            if chan then
+                sim:set_servo_scale(chan, esc.supply_ratio)
+            end
+        end
     end
 
     escs.send_telem(function(i) return pack_of[i].voltage end)
