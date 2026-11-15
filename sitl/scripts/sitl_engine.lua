@@ -17,13 +17,15 @@ the starter motor too.
 It also simulates the fuel pressure, published on BATT8 through the scripting
 battery backend with the voltage field in kPa, as the aircraft's Fuse2 CPN
 reports it. The pump runs while the engine runs, and for a prime at power-up
-(script start, or the main switch coming on); with it off, the line holds
+(script start, or the ECU's power coming back); with it off, the line holds
 pressure. SIM_ICE_FP_NOM moves the reading and nothing else: the engine model
 has no mixture.
 
-With the main switch off (SIM_PWR_DISCON, owned by sitl_power.lua), the ECU
-has no power: no ignition, no EFI data, and no pump. With AVBAT disconnected,
-the PMU has nothing to drive the starter with.
+A failed ECU (SIM_ICE_ECU_FAIL), or one with the main switch off
+(SIM_PWR_DISCON, owned by sitl_power.lua), gives no ignition, so the engine
+dies, and no fuel pump, so the pressure falls back. Its EFI data stops, and
+ArduPilot keeps reporting the last RPM it gave (SW-954). With AVBAT
+disconnected, the PMU has nothing to drive the starter with.
 --]]
 
 local SCRIPT_NAME       = "ICEngine: SITL"
@@ -46,7 +48,7 @@ end
 -- Set up EFI parameters
 PARAM_TABLE_PREFIX = 'SIM_ICE_'
 PARAM_TABLE_KEY = 36
-assert(param:add_table(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, 11), 'could not add ' .. string.sub(PARAM_TABLE_PREFIX, 1, -2) .. ' param table')
+assert(param:add_table(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, 12), 'could not add ' .. string.sub(PARAM_TABLE_PREFIX, 1, -2) .. ' param table')
 --[[
   // @Param: SIM_ICE_CHT1_INC
   // @DisplayName: CHT1 Increase
@@ -137,6 +139,13 @@ local EGT2_INCREASE = bind_add_param('EGT2_INC', 10, 0)
   // @Units: kPa
 --]]
 local FP_NOM = bind_add_param('FP_NOM', 11, 322)
+--[[
+  // @Param: SIM_ICE_ECU_FAIL
+  // @DisplayName: ECU failure
+  // @Description: Fail the ECU: the engine dies, the fuel pump stops, and the EFI data stops (ArduPilot keeps reporting the last RPM)
+  // @Values: 0:Working, 1:Failed
+--]]
+local ECU_FAIL = bind_add_param('ECU_FAIL', 12, 0)
 
 -- We look at RPM2 to see if another source (RealFlight) should provide the RPM
 -- instead of us making one up based on the throttle PWM.
@@ -613,7 +622,7 @@ local function update()
     if not discon then
         return
     end
-    local ecu_on = discon & DISCON_MAIN == 0
+    local ecu_on = discon & DISCON_MAIN == 0 and ECU_FAIL:get() == 0
     engine.set_ecu_powered(ecu_on)
     engine.simulate_engine()
     if ecu_on then
