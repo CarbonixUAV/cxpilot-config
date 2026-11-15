@@ -9,6 +9,7 @@
       "sitl/scripts/sitl_power.lua",
       ["sitl/scripts/modules/sitl_esc_sim.lua", "modules"],
       ["sitl/scripts/modules/sitl_pack.lua", "modules"],
+      ["sitl/scripts/modules/sitl_fuel_tank.lua", "modules"],
       ["sitl/scripts/modules/sitl_vtol_power_capped.lua", "modules/sitl_vtol_power.lua"]
     ]
   },
@@ -22,6 +23,7 @@
       "sitl/scripts/sitl_power.lua",
       ["sitl/scripts/modules/sitl_esc_sim.lua", "modules"],
       ["sitl/scripts/modules/sitl_pack.lua", "modules"],
+      ["sitl/scripts/modules/sitl_fuel_tank.lua", "modules"],
       ["sitl/scripts/modules/sitl_vtol_power_thrust.lua", "modules/sitl_vtol_power.lua"]
     ],
     "external": true

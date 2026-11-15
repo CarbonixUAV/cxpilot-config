@@ -26,7 +26,18 @@ A failed ECU (SIM_ICE_ECU_FAIL), or one with the main switch off
 dies, and no fuel pump, so the pressure falls back. Its EFI data stops, and
 ArduPilot keeps reporting the last RPM it gave (SW-954). With AVBAT
 disconnected, the PMU has nothing to drive the starter with.
+
+The fuel tank (modules/sitl_fuel_tank.lua) drains at the engine's true burn,
+and its level sensor, which sloshes with the aircraft's tilt and acceleration,
+is published on BATT3 as Fuse1 reports it: kg in the voltage field. The EFI
+reports the burn high, by SIM_ICE_EFI_FLOW, as the aircraft's ECU did. With
+the tank dry the pump draws air: the pressure falls first, and the engine
+quits under a second later, as it has in flight. SIM_ICE_FUEL_KG is the fuel
+on board at boot; changing it refuels or drains the tank at once, and the pump
+primes again.
 --]]
+
+local fuel_tank = require('sitl_fuel_tank')
 
 local SCRIPT_NAME       = "ICEngine: SITL"
 
@@ -48,7 +59,7 @@ end
 -- Set up EFI parameters
 PARAM_TABLE_PREFIX = 'SIM_ICE_'
 PARAM_TABLE_KEY = 36
-assert(param:add_table(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, 12), 'could not add ' .. string.sub(PARAM_TABLE_PREFIX, 1, -2) .. ' param table')
+assert(param:add_table(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, 16), 'could not add ' .. string.sub(PARAM_TABLE_PREFIX, 1, -2) .. ' param table')
 --[[
   // @Param: SIM_ICE_CHT1_INC
   // @DisplayName: CHT1 Increase
@@ -146,6 +157,36 @@ local FP_NOM = bind_add_param('FP_NOM', 11, 322)
   // @Values: 0:Working, 1:Failed
 --]]
 local ECU_FAIL = bind_add_param('ECU_FAIL', 12, 0)
+--[[
+  // @Param: SIM_ICE_FUEL_KG
+  // @DisplayName: Fuel on board
+  // @Description: Fuel on board at boot: 9.5 kg is bagged out (O16, Aug 2026). Changing it refuels or drains the tank at once, and the pump primes again.
+  // @Range: 0 15
+  // @Units: kg
+--]]
+local FUEL_KG = bind_add_param('FUEL_KG', 13, 9.5)
+--[[
+  // @Param: SIM_ICE_EFI_FLOW
+  // @DisplayName: EFI fuel flow error
+  // @Description: The EFI's fuel flow, and so its fuel used, as a multiple of the true burn. 1.07 is the aircraft's ECU (O16, Aug 2026).
+  // @Range: 0.5 2
+--]]
+local EFI_FLOW = bind_add_param('EFI_FLOW', 14, 1.07)
+--[[
+  // @Param: SIM_ICE_FL_MUL
+  // @DisplayName: Fuel level sensor scale
+  // @Description: The fuel level sensor's (BATT3's) reading per kg on board, level. 1.04 is O16's tank and calibration; 1 is a perfect sensor.
+  // @Range: 0.5 2
+--]]
+local FL_MUL = bind_add_param('FL_MUL', 15, 1.04)
+--[[
+  // @Param: SIM_ICE_FL_OFS
+  // @DisplayName: Fuel level sensor offset
+  // @Description: The fuel level sensor's (BATT3's) reading with the tank empty, level, before it clips at Fuse1's floor (0.67). 0.32 is O16's tank and calibration; 0 is a perfect sensor.
+  // @Range: -5 5
+  // @Units: kg
+--]]
+local FL_OFS = bind_add_param('FL_OFS', 16, 0.32)
 
 -- We look at RPM2 to see if another source (RealFlight) should provide the RPM
 -- instead of us making one up based on the throttle PWM.
@@ -158,7 +199,6 @@ local NOMINAL_VALUES = {
     IDLE_RPM = 1500,          -- Minimum RPM for delta T calculation
     FULL_RPM = 7100,          -- Maximum RPM for delta T calculation
     CRUISE_SPEED = 25,        -- Cruise speed (m/s)
-    CRUISE_RPM = 5000,        -- Nominal RPM for burn rate
 }
 
 local CHT_FIT_VALUES = {
@@ -193,10 +233,6 @@ local EGT2_FIT_VALUES = {
     KAPPA = 0.0,              -- Scaling factor for thermal inertia changes with airspeed
 }
 
-local FUEL_FIT_VALUES = {
-    BURN_RATE = 0.816,        -- Nominal burn rate at cruise RPM (kg/hr)
-}
-
 -- Fuel pressure, from O16 22 Aug 2026 log 52 (AFM: nominal 300 kPa +/- 10%)
 local FUEL_PRESSURE = {
     HELD_BELOW_NOM = 38,      -- kPa; the line holds this far below nominal with the pump off (284 kPa at 322)
@@ -212,9 +248,16 @@ local FUEL_PRESSURE = {
     RIPPLE = 0.5,             -- kPa amplitude with the pump running
     RIPPLE_HZ = 0.5,
     RESOLUTION = 0.25,        -- kPa
+    TAU_DRY = 1.5,            -- s; the fall with the pump drawing air
+    STARVED_BELOW_NOM = 120,  -- kPa; the engine quits this far below nominal
 }
-local FUEL_FLOW_FULL = FUEL_FIT_VALUES.BURN_RATE * (NOMINAL_VALUES.FULL_RPM / NOMINAL_VALUES.CRUISE_RPM)^3
+local FUEL_FLOW_FULL = fuel_tank.burn_kgph(NOMINAL_VALUES.FULL_RPM)
 local FUEL_PRESSURE_BATT_IDX = 7 -- BATT8
+
+-- The Hirth reports its flow in 0.1 L/h steps; EFI_COEF1 (0.8416 in
+-- OttanoCommon.parm) calibrates them to kg/h
+local EFI_FLOW_STEP = 0.1 * 0.8416 -- kg/h
+local FUEL_LEVEL_BATT_IDX = 2 -- BATT3
 
 -- SIM_PWR_DISCON belongs to sitl_power.lua, which may load after this script.
 -- Until it has, nothing is known to have power (a cold boot would otherwise
@@ -313,8 +356,11 @@ local function engine_control()
     local cylinder_state = Cylinder_Status()
     local rpm = 0
     local air_pressure = 0
-    local fuel_consumption_lph = 0
-    local fuel_total_l = 0
+    local fuel_flow_kgph = 0 -- as the EFI reports it
+    local fuel_used_kg = 0   -- as the EFI reports it
+    local true_kgph = 0
+    local tank = fuel_tank.new(FUEL_KG:get())
+    local fuel_level_state = BattMonitorScript_State()
     local temps = {
         cht = {get_air_temperature(), get_air_temperature()}, -- Cylinder head temperatures
         egt = {get_air_temperature(), get_air_temperature()}, -- Exhaust gas temperatures
@@ -332,6 +378,7 @@ local function engine_control()
     local fired_ms = nil       -- Timestamp of when the engine last fired
     local dip_from = 0         -- Pressure when it fired
     local bleed_fast, bleed_slow = 0, 0 -- Excess over the held pressure, bleeding off with the pump off
+    local deficit = 0          -- How far below the held pressure the line was when the pump stopped
     local last_fuel_ms = nil
     local fuel_batt_state = BattMonitorScript_State()
 
@@ -349,8 +396,9 @@ local function engine_control()
 
         efi_state:engine_speed_rpm(uint32_t(rpm))
 
-        efi_state:fuel_consumption_rate_cm3pm(fuel_consumption_lph * 1000.0 / 60.0)
-        efi_state:estimated_consumed_fuel_volume_cm3(fuel_total_l * 1000.0)
+        -- Grams in ArduPilot's cm3 fields, as EFI_COEF1 makes them on the aircraft
+        efi_state:fuel_consumption_rate_cm3pm(fuel_flow_kgph * 1000.0 / 60.0)
+        efi_state:estimated_consumed_fuel_volume_cm3(fuel_used_kg * 1000.0)
         efi_state:intake_manifold_pressure_kpa(air_pressure)
         efi_state:intake_manifold_temperature(c_to_kelvin(temps.imt))
         local throttle_pwm = SRV_Channels:get_output_pwm(70) or 1000
@@ -495,10 +543,34 @@ local function engine_control()
             temps.egt[i] = update_cht(temps.egt[i], egt_steady, airspeed, params.TCONST_CRUISE, params.KAPPA)
         end
 
-        -- Simulate fuel consumption
-        local fuel_factor = rpm / NOMINAL_VALUES.CRUISE_RPM
-        fuel_consumption_lph = FUEL_FIT_VALUES.BURN_RATE * fuel_factor^3
-        fuel_total_l = fuel_total_l + fuel_consumption_lph / 3600 / UPDATE_HZ
+        -- Simulate fuel consumption, and the EFI's report of it
+        true_kgph = fuel_tank.burn_kgph(rpm)
+        fuel_flow_kgph = math.floor(true_kgph * EFI_FLOW:get() / EFI_FLOW_STEP + 0.5) * EFI_FLOW_STEP
+        fuel_used_kg = fuel_used_kg + fuel_flow_kgph / 3600 / UPDATE_HZ
+        tank.step(1 / UPDATE_HZ, true_kgph, ins:get_accel(0))
+    end
+
+    ---Refuel or drain the tank. The pump primes again, if the ECU has power.
+    ---@param kg number
+    function self.set_fuel(kg)
+        tank.set_mass(kg)
+        deficit = 0
+        if ecu_powered then
+            prime_end_ms = millis() + uint32_t(FUEL_PRESSURE.PRIME_S * 1000)
+        end
+    end
+
+    ---@return boolean -- the line has the pressure the engine needs to run
+    function self.fueled()
+        return fuel_pressure > FP_NOM:get() - FUEL_PRESSURE.STARVED_BELOW_NOM
+    end
+
+    ---Publish the fuel level sensor's reading on BATT3
+    function self.publish_fuel_level()
+        fuel_level_state:healthy(true)
+        fuel_level_state:voltage(tank.sensor(1 / UPDATE_HZ, FL_MUL:get(), FL_OFS:get()))
+        fuel_level_state:current_amps(0)
+        battery:handle_scripting(FUEL_LEVEL_BATT_IDX, fuel_level_state)
     end
 
     ---Power the ECU, or not. It primes the pump as it powers up.
@@ -531,17 +603,22 @@ local function engine_control()
 
         if pump_on then
             local target, tau
-            if is_running and fired_ms and (now_ms - fired_ms):tofloat() < FUEL_PRESSURE.DIP_S * 1000 then
+            if tank.dry() then
+                -- The pump draws air
+                target, tau = 0, FUEL_PRESSURE.TAU_DRY
+            elseif is_running and fired_ms and (now_ms - fired_ms):tofloat() < FUEL_PRESSURE.DIP_S * 1000 then
                 -- The engine draws fuel before the pump has built pressure
                 target, tau = dip_from - FUEL_PRESSURE.DIP, FUEL_PRESSURE.TAU_DIP
             else
-                local droop = is_running and FUEL_PRESSURE.DROOP_FULL * fuel_consumption_lph / FUEL_FLOW_FULL or 0
+                local droop = is_running and FUEL_PRESSURE.DROOP_FULL * true_kgph / FUEL_FLOW_FULL or 0
                 target, tau = nominal - droop, FUEL_PRESSURE.TAU_PUMP
             end
             fuel_pressure = target + (fuel_pressure - target) * math.exp(-dt / tau)
         else
             if pump_was_on then
-                local excess = fuel_pressure - held
+                -- A line the pump left below the held pressure (run dry) stays there
+                deficit = math.max(held - fuel_pressure, 0)
+                local excess = fuel_pressure - (held - deficit)
                 bleed_fast = excess * FUEL_PRESSURE.FAST_FRACTION
                 bleed_slow = excess - bleed_fast
             end
@@ -549,7 +626,7 @@ local function engine_control()
             bleed_slow = bleed_slow * math.exp(-dt / FUEL_PRESSURE.TAU_SLOW)
             -- The held pressure follows the nominal, so a lowered nominal also
             -- reads low after a stop
-            fuel_pressure = held + bleed_fast + bleed_slow
+            fuel_pressure = held - deficit + bleed_fast + bleed_slow
         end
         pump_was_on = pump_on
 
@@ -609,6 +686,7 @@ local function engine_control()
 end
 
 local engine = engine_control()
+local last_fuel_kg = FUEL_KG:get()
 
 local function update()
     if not efi_backend then
@@ -622,6 +700,13 @@ local function update()
     if not discon then
         return
     end
+
+    local fuel_kg = FUEL_KG:get()
+    if fuel_kg ~= last_fuel_kg then
+        engine.set_fuel(fuel_kg)
+        last_fuel_kg = fuel_kg
+    end
+
     local ecu_on = discon & DISCON_MAIN == 0 and ECU_FAIL:get() == 0
     engine.set_ecu_powered(ecu_on)
     engine.simulate_engine()
@@ -638,8 +723,10 @@ local function update()
     if ecu_on and discon & DISCON_AVBAT == 0 and STRT_PIN:get() >= 0 then
         start = SIM_PIN_MASK:get() & (1 << STRT_PIN:get()) ~= 0
     end
-    engine.handle_ignition_and_starter(ignition, start)
+    -- Without fuel pressure, the ignition has nothing to light
+    engine.handle_ignition_and_starter(ignition and engine.fueled(), start)
     engine.simulate_fuel_pressure()
+    engine.publish_fuel_level()
 end
 
 -- Wrapper to handle errors

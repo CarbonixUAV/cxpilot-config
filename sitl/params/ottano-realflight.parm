@@ -7,12 +7,15 @@ ARSPD_TYPE,2
 ARSPD2_OFFSET,2013
 ARSPD2_PIN,2
 ARSPD2_TYPE,2
-# AVBAT (2), the bus (6, 7) and fuel pressure (8) come from sitl_power.lua and
-# sitl_engine.lua through the scripting backend; their failsafes stay as is
+# AVBAT (2), the bus (6, 7), fuel level (3) and fuel pressure (8) come from
+# sitl_power.lua and sitl_engine.lua through the scripting backend; their
+# failsafes stay as is
 @delete BATT2_MONITOR
 @delete BATT2_SERIAL_NUM
 BATT2_MONITOR,29
-@delete BATT3_* # Fuel level isn't simulated
+@delete BATT3_MONITOR
+@delete BATT3_SERIAL_NUM
+BATT3_MONITOR,29
 @delete BATT6_AMP_*
 @delete BATT6_*_PIN
 @delete BATT6_MONITOR
