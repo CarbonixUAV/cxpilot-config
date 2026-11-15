@@ -374,9 +374,13 @@ local function engine_control()
     function self.simulate_engine()
         -- If the RPM sensor is None, or EFI (prevent circular dependency), then we need to make up the RPM
         if RPM_TYPE:get() == 3 or RPM_TYPE:get() == 0 then
-            local thr = (SRV_Channels:get_output_pwm(70) - OFF_PWM:get()) / (MAX_PWM:get() - OFF_PWM:get())
-            thr = constrain(thr, 0, 1)
-            rpm = math.sqrt(thr) * NOMINAL_VALUES.FULL_RPM
+            -- An occasional race condition returns nil; keep the last RPM
+            local pwm = SRV_Channels:get_output_pwm(70)
+            if pwm then
+                local thr = (pwm - OFF_PWM:get()) / (MAX_PWM:get() - OFF_PWM:get())
+                thr = constrain(thr, 0, 1)
+                rpm = math.sqrt(thr) * NOMINAL_VALUES.FULL_RPM
+            end
         else
             rpm = constrain(RPM:get_rpm(1) or 0, 0, 50000)
         end
