@@ -13,6 +13,12 @@ SIM_ICE_IGN_PIN and SIM_ICE_STRT_PIN. The script then simulates the idle and
 starter behavior by adjusting the throttle servo's min and max values. You can
 fail the engine by setting the ignition pin to -1, and you can similarly fail
 the starter motor too.
+
+It also simulates the fuel pressure, published on BATT8 through the scripting
+battery backend with the voltage field in kPa, as the aircraft's Fuse2 CPN
+reports it. The pump runs while the engine runs, and for a prime at power-up
+(script start); with it off, the line holds pressure. SIM_ICE_FP_NOM moves the
+reading and nothing else: the engine model has no mixture.
 --]]
 
 local SCRIPT_NAME       = "ICEngine: SITL"
@@ -35,7 +41,7 @@ end
 -- Set up EFI parameters
 PARAM_TABLE_PREFIX = 'SIM_ICE_'
 PARAM_TABLE_KEY = 36
-assert(param:add_table(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, 10), 'could not add ' .. string.sub(PARAM_TABLE_PREFIX, 1, -2) .. ' param table')
+assert(param:add_table(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, 11), 'could not add ' .. string.sub(PARAM_TABLE_PREFIX, 1, -2) .. ' param table')
 --[[
   // @Param: SIM_ICE_CHT1_INC
   // @DisplayName: CHT1 Increase
@@ -118,12 +124,20 @@ local EGT1_INCREASE = bind_add_param('EGT1_INC', 9, 0)
   // @Units: degC
 --]]
 local EGT2_INCREASE = bind_add_param('EGT2_INC', 10, 0)
+--[[
+  // @Param: SIM_ICE_FP_NOM
+  // @DisplayName: Nominal fuel pressure
+  // @Description: Fuel pressure with the pump running at idle. It droops with fuel flow, and the line holds 38 kPa below it with the pump off. Moves the indication only.
+  // @Range: 0 500
+  // @Units: kPa
+--]]
+local FP_NOM = bind_add_param('FP_NOM', 11, 322)
 
 -- We look at RPM2 to see if another source (RealFlight) should provide the RPM
 -- instead of us making one up based on the throttle PWM.
 local RPM_TYPE = bind_param('RPM2_TYPE')
 
-local UPDATE_HZ = 4
+local UPDATE_HZ = 10
 
 -- behavior-tuning constants
 local NOMINAL_VALUES = {
@@ -168,6 +182,25 @@ local EGT2_FIT_VALUES = {
 local FUEL_FIT_VALUES = {
     BURN_RATE = 0.816,        -- Nominal burn rate at cruise RPM (kg/hr)
 }
+
+-- Fuel pressure, from O16 22 Aug 2026 log 52 (AFM: nominal 300 kPa +/- 10%)
+local FUEL_PRESSURE = {
+    HELD_BELOW_NOM = 38,      -- kPa; the line holds this far below nominal with the pump off (284 kPa at 322)
+    DROOP_FULL = 15,          -- kPa; droop at full-throttle fuel flow
+    TAU_PUMP = 0.55,          -- s; approach to the pump's pressure
+    DIP = 10,                 -- kPa; dip as the engine fires, before the pump builds pressure
+    DIP_S = 0.35,             -- s
+    TAU_DIP = 0.1,            -- s
+    FAST_FRACTION = 0.56,     -- of the excess over the held pressure that bleeds off fast once the pump stops
+    TAU_FAST = 0.5,           -- s
+    TAU_SLOW = 8.5,           -- s; and the rest, slowly
+    PRIME_S = 3,              -- s of pump at power-up
+    RIPPLE = 0.5,             -- kPa amplitude with the pump running
+    RIPPLE_HZ = 0.5,
+    RESOLUTION = 0.25,        -- kPa
+}
+local FUEL_FLOW_FULL = FUEL_FIT_VALUES.BURN_RATE * (NOMINAL_VALUES.FULL_RPM / NOMINAL_VALUES.CRUISE_RPM)^3
+local FUEL_PRESSURE_BATT_IDX = 7 -- BATT8
 
 -- Utility functions
 local function constrain(value, min_val, max_val)
@@ -251,6 +284,17 @@ local function engine_control()
     }
     local is_running = false
     local crank_start_ms = nil -- Timestamp of when the starter first turned on
+
+    -- Fuel pressure state
+    local fuel_pressure = FP_NOM:get() - FUEL_PRESSURE.HELD_BELOW_NOM
+    local pump_was_on = false
+    local was_running = false
+    local prime_end_ms = millis() + uint32_t(FUEL_PRESSURE.PRIME_S * 1000)
+    local fired_ms = nil       -- Timestamp of when the engine last fired
+    local dip_from = 0         -- Pressure when it fired
+    local bleed_fast, bleed_slow = 0, 0 -- Excess over the held pressure, bleeding off with the pump off
+    local last_fuel_ms = nil
+    local fuel_batt_state = BattMonitorScript_State()
 
     -- Build and set the EFI_State that is passed into the EFI Scripting backend
     function self.set_EFI_State()
@@ -418,6 +462,59 @@ local function engine_control()
         fuel_total_l = fuel_total_l + fuel_consumption_lph / 3600 / UPDATE_HZ
     end
 
+    ---Simulate the fuel pressure and publish it on BATT8
+    function self.simulate_fuel_pressure()
+        local now_ms = millis()
+        local dt = last_fuel_ms and (now_ms - last_fuel_ms):tofloat() * 0.001 or 0
+        last_fuel_ms = now_ms
+
+        local nominal = FP_NOM:get()
+        local held = nominal - FUEL_PRESSURE.HELD_BELOW_NOM
+        local priming = now_ms < prime_end_ms
+        local pump_on = is_running or priming
+
+        if is_running and not was_running then
+            fired_ms = now_ms
+            dip_from = fuel_pressure
+        end
+        was_running = is_running
+
+        if pump_on then
+            local target, tau
+            if is_running and fired_ms and (now_ms - fired_ms):tofloat() < FUEL_PRESSURE.DIP_S * 1000 then
+                -- The engine draws fuel before the pump has built pressure
+                target, tau = dip_from - FUEL_PRESSURE.DIP, FUEL_PRESSURE.TAU_DIP
+            else
+                local droop = is_running and FUEL_PRESSURE.DROOP_FULL * fuel_consumption_lph / FUEL_FLOW_FULL or 0
+                target, tau = nominal - droop, FUEL_PRESSURE.TAU_PUMP
+            end
+            fuel_pressure = target + (fuel_pressure - target) * math.exp(-dt / tau)
+        else
+            if pump_was_on then
+                local excess = fuel_pressure - held
+                bleed_fast = excess * FUEL_PRESSURE.FAST_FRACTION
+                bleed_slow = excess - bleed_fast
+            end
+            bleed_fast = bleed_fast * math.exp(-dt / FUEL_PRESSURE.TAU_FAST)
+            bleed_slow = bleed_slow * math.exp(-dt / FUEL_PRESSURE.TAU_SLOW)
+            -- The held pressure follows the nominal, so a lowered nominal also
+            -- reads low after a stop
+            fuel_pressure = held + bleed_fast + bleed_slow
+        end
+        pump_was_on = pump_on
+
+        local reported = fuel_pressure
+        if is_running then
+            reported = reported + FUEL_PRESSURE.RIPPLE * math.sin(2 * math.pi * FUEL_PRESSURE.RIPPLE_HZ * now_ms:tofloat() * 0.001)
+        end
+        reported = math.floor(reported / FUEL_PRESSURE.RESOLUTION + 0.5) * FUEL_PRESSURE.RESOLUTION
+
+        fuel_batt_state:healthy(true)
+        fuel_batt_state:voltage(reported)
+        fuel_batt_state:current_amps(0)
+        battery:handle_scripting(FUEL_PRESSURE_BATT_IDX, fuel_batt_state)
+    end
+
     ---Update servo parameters to simulate ignition and starter
     ---@param ignition boolean
     ---@param start boolean
@@ -484,6 +581,7 @@ local function update()
         start = SIM_PIN_MASK:get() & (1 << STRT_PIN:get()) ~= 0
     end
     engine.handle_ignition_and_starter(ignition, start)
+    engine.simulate_fuel_pressure()
 end
 
 -- Wrapper to handle errors
