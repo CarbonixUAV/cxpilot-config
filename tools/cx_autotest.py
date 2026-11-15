@@ -251,6 +251,24 @@ class AutoTestCarbonix(AutoTestQuadPlane):
             if self.get_sim_time_cached() - tstart > timeout:
                 raise NotAchievedException(f'BATT{batt} at {v:.2f} V, want {v_min:.2f} to {v_max:.2f}')
 
+    def esc_pack_voltage(self, mask, duration=2):
+        '''Return the mean voltage the ESCs in a mask report over a period.
+
+        The ESC voltages are raw, unlike a monitor's with the
+        resistance-compensated voltage option.
+        '''
+        volts = []
+        tstart = self.get_sim_time()
+        while self.get_sim_time_cached() - tstart < duration:
+            m = self.mav.recv_match(type=['ESC_TELEMETRY_1_TO_4', 'ESC_TELEMETRY_5_TO_8'], blocking=True, timeout=1)
+            if m is None:
+                continue
+            first = 0 if m.get_type() == 'ESC_TELEMETRY_1_TO_4' else 4
+            volts += [m.voltage[k] * 0.01 for k in range(4) if int(mask) & (1 << (first + k))]
+        if not volts:
+            raise NotAchievedException(f'No ESC telemetry for mask {mask}')
+        return statistics.mean(volts)
+
     def set_sim_charge(self, param_name, pct):
         '''Set a simulated pack's charge through its SIM_*_SOC parameter.
 
@@ -1061,6 +1079,95 @@ class AutoTestCarbonix(AutoTestQuadPlane):
         # Clear the latched battery failsafe
         self.reboot_sitl()
 
+    def VTOLPacks(self):
+        '''Test the simulated VTOL packs (BATT4, BATT5, and BATT1 over them).'''
+        if not self.has_parameter('SIM_VTB_SOC_L'):
+            self.progress('No simulated VTOL packs on this frame; skipping')
+            return
+
+        self.context_set_message_rate_hz(mavutil.mavlink.MAVLINK_MSG_ID_BATTERY_STATUS, 50)
+        # Report raw voltages: setting a pack's charge steps its voltage with no
+        # change of current, which ArduPilot's resistance estimate takes for
+        # resistance, so the compensated voltage reads high afterwards
+        self.set_parameters({'BATT_OPTIONS': 512, 'BATT4_OPTIONS': 0, 'BATT5_OPTIONS': 0})
+        self.reset_sim_packs()
+        left_mask = self.get_parameter('BATT4_ESC_MASK')
+        right_mask = self.get_parameter('BATT5_ESC_MASK')
+
+        self.start_subtest('Packs start full')
+        v4, v5, v1 = self.battery_voltage(4), self.battery_voltage(5), self.battery_voltage(1)
+        self.progress(f'BATT4 {v4:.2f} V, BATT5 {v5:.2f} V, BATT1 {v1:.2f} V')
+        if not (49.8 < v4 < 50.6 and 49.8 < v5 < 50.6):
+            raise NotAchievedException('VTOL packs not full')
+
+        self.start_subtest('One pack at a lower charge: BATT1 follows the lower')
+        self.set_sim_charge('SIM_VTB_SOC_L', 50)
+        v4 = self.wait_battery_voltage(4, 45.5, 46.5, timeout=5)
+        v5, v1 = self.battery_voltage(5), self.battery_voltage(1)
+        self.progress(f'BATT4 {v4:.2f} V, BATT5 {v5:.2f} V, BATT1 {v1:.2f} V')
+        if v5 < 49.8:
+            raise NotAchievedException('The right pack moved with the left')
+        if abs(v1 - v4) > 0.3:
+            raise NotAchievedException('BATT1 does not follow the lower pack')
+
+        self.start_subtest('Reset puts both packs back to full')
+        self.reset_sim_packs()
+        self.wait_battery_voltage(4, 49.8, 50.6, timeout=5)
+
+        self.start_subtest('A draining simulator battery warns to set unlimited fuel')
+        warning = 'Set RealFlight unlimited fuel'
+        self.context_push()
+        self.context_collect('STATUSTEXT')
+        self.assert_no_text(warning, timeout=1, check_context=True)
+        # BATT9 is the physics backend's battery: make it read about 40 V
+        volt_mult = self.get_parameter('BATT9_VOLT_MULT')
+        self.set_parameter('BATT9_VOLT_MULT', volt_mult * 40 / self.battery_voltage(9, duration=1))
+        self.wait_text(warning, timeout=15, check_context=True)
+        t_first = self.get_sim_time()
+        self.context_clear_collection('STATUSTEXT')
+        self.wait_text(warning, timeout=15, check_context=True)
+        interval = self.get_sim_time() - t_first
+        self.progress(f'Warning repeated after {interval:.1f} s')
+        if not 8 < interval < 12:
+            raise NotAchievedException('Warning not repeated about every 10 s')
+        self.context_pop()
+        self.context_push()
+        self.context_collect('STATUSTEXT')
+        self.delay_sim_time(1)
+        self.context_clear_collection('STATUSTEXT')
+        self.assert_no_text(warning, timeout=12, check_context=True)
+        self.context_pop()
+
+        self.start_subtest('Packs sag in the hover and recover after')
+        if self.get_parameter('ICE_ENABLE'):
+            self.prepare_engine(rapid_warmup=True)
+        self.wait_ready_to_arm()
+        self.change_mode('QHOVER')
+        self.arm_vehicle()
+        self.set_rc(3, 1800)
+        self.wait_altitude(15, 50, relative=True, timeout=60)
+        self.set_rc(3, 1500)
+        self.delay_sim_time(15)
+        hover_left = self.esc_pack_voltage(left_mask)
+        hover_right = self.esc_pack_voltage(right_mask)
+        _, amps = self.battery_samples(4, 2)
+        self.progress(f'Hover: left {hover_left:.2f} V, right {hover_right:.2f} V, '
+                      f'left pack {statistics.mean(amps):.0f} A')
+        if not (38 < hover_left < 47 and 38 < hover_right < 47):
+            raise NotAchievedException('VTOL packs did not sag in the hover')
+        if not 120 < statistics.mean(amps) < 330:
+            raise NotAchievedException('VTOL pack current far from the aircraft\'s (about 220 A)')
+        self.change_mode('QLAND')
+        self.wait_disarmed(timeout=120)
+        rested = self.esc_pack_voltage(left_mask, duration=1)
+        self.delay_sim_time(60)
+        crept = self.esc_pack_voltage(left_mask)
+        self.progress(f'After landing: left {rested:.2f} V, a minute later {crept:.2f} V')
+        if rested - hover_left < 3:
+            raise NotAchievedException('Left pack did not step up after the motors stopped')
+        if crept - rested < 0.15:
+            raise NotAchievedException('Left pack did not creep up after the motors stopped')
+
     def FuelPressure(self):
         '''Test the simulated fuel pressure (BATT8, kPa in the voltage field).'''
         if not self.has_parameter('SIM_ICE_FP_NOM'):
@@ -1125,6 +1232,7 @@ class AutoTestCarbonix(AutoTestQuadPlane):
             self.EngineHourMeter,
             self.FenceTests,
             self.AvionicsPower,
+            self.VTOLPacks,
             self.FuelPressure,
         ]
 
