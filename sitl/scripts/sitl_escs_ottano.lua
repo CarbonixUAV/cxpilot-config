@@ -24,8 +24,10 @@ power, so without that its electric pusher drains the battery the VTOL motors
 fly on.
 
 Injects: SIM_ESC_* (telemetry failure, overheat), SIM_VTB_* (set a pack's
-charge, resistance multiplier), and SIM_PWR_RESET (owned by sitl_power.lua),
-which puts both packs back to full on any change.
+charge, resistance multiplier), and these owned by sitl_power.lua:
+SIM_PWR_RESET puts both packs back to full on any change, SIM_PWR_HOLD holds a
+pack's charge, and SIM_PWR_DISCON disconnects a pack (its ESCs go quiet and
+its motors get nothing).
 --]]
 
 local esc_sim = require('sitl_esc_sim')
@@ -142,8 +144,9 @@ local VTOL_PACK = {
 local escs = esc_sim.new(C)
 
 local packs = {
-    {name = 'left', mask = param:get('BATT4_ESC_MASK'), soc = SOC_L, rx = RX_L, model = pack.new(VTOL_PACK), voltage = 0},
-    {name = 'right', mask = param:get('BATT5_ESC_MASK'), soc = SOC_R, rx = RX_R, model = pack.new(VTOL_PACK), voltage = 0},
+    -- bit: the pack's bit in SIM_PWR_HOLD and SIM_PWR_DISCON
+    {name = 'left', bit = 1, mask = param:get('BATT4_ESC_MASK'), soc = SOC_L, rx = RX_L, model = pack.new(VTOL_PACK), voltage = 0, connected = true},
+    {name = 'right', bit = 2, mask = param:get('BATT5_ESC_MASK'), soc = SOC_R, rx = RX_R, model = pack.new(VTOL_PACK), voltage = 0, connected = true},
 }
 -- pack_of[i]: the pack that ESC telemetry index i (1-based) draws from
 local pack_of = {}
@@ -160,28 +163,52 @@ for i = 1, #escs.escs do
 end
 local power_model = vtol_power.new(HOVER_POWER_PER_PACK * #packs / #escs.escs, MAX_POWER_RATIO)
 
--- SIM_PWR_RESET belongs to sitl_power.lua, which may load after this script
-local PWR_RESET = nil
+-- SIM_PWR_RESET, SIM_PWR_HOLD and SIM_PWR_DISCON belong to sitl_power.lua,
+-- which may load after this script. Until it has, the packs aren't known to be
+-- connected (a cold boot would otherwise start with their ESCs reporting); a
+-- frame without it gets them connected.
+local PWR_RESET, PWR_HOLD, PWR_DISCON = nil, nil, nil
+local POWER_WAIT_MS = 5000
+local script_start_ms = millis()
 local last_reset_value = nil
 local last_ms = nil
 local physics_low_since_ms = nil
 local physics_warned_ms = nil
 local warned = {}
 
-local function handle_injects()
+local function bind_power_params()
     if not PWR_RESET then
         local p = Parameter()
         if p:init('SIM_PWR_RESET') then
             PWR_RESET = p
             last_reset_value = p:get()
         end
-    elseif PWR_RESET:get() ~= last_reset_value then
+    end
+    if not PWR_HOLD then
+        local p = Parameter()
+        if p:init('SIM_PWR_HOLD') then
+            PWR_HOLD = p
+        end
+    end
+    if not PWR_DISCON then
+        local p = Parameter()
+        if p:init('SIM_PWR_DISCON') then
+            PWR_DISCON = p
+        end
+    end
+end
+
+local function handle_injects()
+    bind_power_params()
+    if PWR_RESET and PWR_RESET:get() ~= last_reset_value then
         last_reset_value = PWR_RESET:get()
         for _, p in ipairs(packs) do
             p.model.reset()
         end
         gcs:send_text(6, 'SITL: VTOL packs reset to full')
     end
+    local hold = PWR_HOLD and math.floor(PWR_HOLD:get()) or 0
+    local discon = PWR_DISCON and math.floor(PWR_DISCON:get()) or 0
     for _, p in ipairs(packs) do
         local soc = p.soc:get()
         if soc >= 0 then
@@ -190,6 +217,19 @@ local function handle_injects()
             gcs:send_text(6, string.format('SITL: %s VTOL pack set to %.0f%%', p.name, p.model.soc_pct()))
         end
         p.model.set_resistance_mult(p.rx:get())
+        p.model.set_hold(hold & p.bit ~= 0)
+        local connected = discon & p.bit == 0
+        if connected ~= p.connected then
+            p.connected = connected
+            gcs:send_text(6, string.format('SITL: %s VTOL pack %s', p.name, connected and 'connected' or 'disconnected'))
+        end
+    end
+    -- A disconnected pack's ESCs are unpowered, and its motors get nothing
+    for i, esc in ipairs(escs.escs) do
+        esc.powered = pack_of[i].connected
+        if not esc.powered then
+            esc.supply_ratio = 0
+        end
     end
 end
 
@@ -219,6 +259,9 @@ local function update()
     last_ms = now_ms
 
     handle_injects()
+    if not PWR_DISCON and (now_ms - script_start_ms):tofloat() < POWER_WAIT_MS then
+        return
+    end
     escs.update_thrust()
 
     power_model.update(escs.escs, dt)
@@ -248,7 +291,9 @@ local function update()
     escs.report_currents()
     for i, esc in ipairs(escs.escs) do
         local p = pack_of[i]
-        if esc.true_current <= 0 then
+        if not p.connected then
+            esc.current = 0
+        elseif esc.true_current <= 0 then
             esc.current = (REST_CURRENT[p.name] + esc_sim.gaussian_noise(REST_CURRENT_NOISE * math.sqrt(p.n_escs))) / p.n_escs
         end
         p.reported_current = p.reported_current + esc.current
@@ -261,13 +306,18 @@ local function update()
         p.model.step(p.current, dt)
     end
 
-    if vtol_power.emulates_sag then
-        for i, esc in ipairs(escs.escs) do
-            esc.supply_ratio = math.min(math.max(pack_of[i].voltage / FULL_PACK_VOLTAGE, 0), 1)
-            local chan = SRV_Channels:find_channel(esc.servo_func)
-            if chan then
-                sim:set_servo_scale(chan, esc.supply_ratio)
-            end
+    for i, esc in ipairs(escs.escs) do
+        local p = pack_of[i]
+        if not p.connected then
+            esc.supply_ratio = 0
+        elseif vtol_power.emulates_sag then
+            esc.supply_ratio = math.min(math.max(p.voltage / FULL_PACK_VOLTAGE, 0), 1)
+        else
+            esc.supply_ratio = 1
+        end
+        local chan = SRV_Channels:find_channel(esc.servo_func)
+        if chan then
+            sim:set_servo_scale(chan, esc.supply_ratio)
         end
     end
 

@@ -17,8 +17,13 @@ the starter motor too.
 It also simulates the fuel pressure, published on BATT8 through the scripting
 battery backend with the voltage field in kPa, as the aircraft's Fuse2 CPN
 reports it. The pump runs while the engine runs, and for a prime at power-up
-(script start); with it off, the line holds pressure. SIM_ICE_FP_NOM moves the
-reading and nothing else: the engine model has no mixture.
+(script start, or the main switch coming on); with it off, the line holds
+pressure. SIM_ICE_FP_NOM moves the reading and nothing else: the engine model
+has no mixture.
+
+With the main switch off (SIM_PWR_DISCON, owned by sitl_power.lua), the ECU
+has no power: no ignition, no EFI data, and no pump. With AVBAT disconnected,
+the PMU has nothing to drive the starter with.
 --]]
 
 local SCRIPT_NAME       = "ICEngine: SITL"
@@ -202,6 +207,30 @@ local FUEL_PRESSURE = {
 local FUEL_FLOW_FULL = FUEL_FIT_VALUES.BURN_RATE * (NOMINAL_VALUES.FULL_RPM / NOMINAL_VALUES.CRUISE_RPM)^3
 local FUEL_PRESSURE_BATT_IDX = 7 -- BATT8
 
+-- SIM_PWR_DISCON belongs to sitl_power.lua, which may load after this script.
+-- Until it has, nothing is known to have power (a cold boot would otherwise
+-- start with the ECU on); a frame without it gets everything connected.
+local PWR_DISCON = nil
+local DISCON_AVBAT = 4
+local DISCON_MAIN = 16
+local POWER_WAIT_MS = 5000
+local script_start_ms = millis()
+
+---@return integer|nil -- SIM_PWR_DISCON; nil while sitl_power.lua may still be loading
+local function disconnected()
+    if not PWR_DISCON then
+        local p = Parameter()
+        if not p:init('SIM_PWR_DISCON') then
+            if (millis() - script_start_ms):tofloat() < POWER_WAIT_MS then
+                return nil
+            end
+            return 0
+        end
+        PWR_DISCON = p
+    end
+    return math.floor(PWR_DISCON:get())
+end
+
 -- Utility functions
 local function constrain(value, min_val, max_val)
     return math.min(math.max(value, min_val), max_val)
@@ -290,6 +319,7 @@ local function engine_control()
     local pump_was_on = false
     local was_running = false
     local prime_end_ms = millis() + uint32_t(FUEL_PRESSURE.PRIME_S * 1000)
+    local ecu_powered = nil
     local fired_ms = nil       -- Timestamp of when the engine last fired
     local dip_from = 0         -- Pressure when it fired
     local bleed_fast, bleed_slow = 0, 0 -- Excess over the held pressure, bleeding off with the pump off
@@ -462,6 +492,17 @@ local function engine_control()
         fuel_total_l = fuel_total_l + fuel_consumption_lph / 3600 / UPDATE_HZ
     end
 
+    ---Power the ECU, or not. It primes the pump as it powers up.
+    ---@param on boolean
+    function self.set_ecu_powered(on)
+        if on and ecu_powered == false then
+            prime_end_ms = millis() + uint32_t(FUEL_PRESSURE.PRIME_S * 1000)
+        elseif not on and ecu_powered ~= false then
+            prime_end_ms = millis()
+        end
+        ecu_powered = on
+    end
+
     ---Simulate the fuel pressure and publish it on BATT8
     function self.simulate_fuel_pressure()
         local now_ms = millis()
@@ -568,16 +609,24 @@ local function update()
         end
      end
 
+    local discon = disconnected()
+    if not discon then
+        return
+    end
+    local ecu_on = discon & DISCON_MAIN == 0
+    engine.set_ecu_powered(ecu_on)
     engine.simulate_engine()
-    engine.set_EFI_State()
+    if ecu_on then
+        engine.set_EFI_State()
+    end
 
-    -- Emulate ignition and starter
+    -- Emulate ignition and starter, which need the ECU and the PMU
     local ignition = false
     local start = false
-    if IGN_PIN:get() >= 0 then
+    if ecu_on and IGN_PIN:get() >= 0 then
         ignition = SIM_PIN_MASK:get() & (1 << IGN_PIN:get()) ~= 0
     end
-    if STRT_PIN:get() >= 0 then
+    if ecu_on and discon & DISCON_AVBAT == 0 and STRT_PIN:get() >= 0 then
         start = SIM_PIN_MASK:get() & (1 << STRT_PIN:get()) ~= 0
     end
     engine.handle_ignition_and_starter(ignition, start)

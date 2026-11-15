@@ -18,7 +18,12 @@ board and the payload. The starter runs through the PMU from AVBAT, and the PMU
 doesn't generate while it runs, whatever the RPM. When AVBAT sags below the
 PMU's input limit while cranking, the PMU's output drops and the batteries hold
 the bus. If the PMU fails, the payload goes dark and the bus falls to the
-batteries.
+batteries. With the main switch off (SIM_PWR_DISCON), the PMU and the payload
+are dark too, and AVBAT's monitor reads 0 V: it measures AVBAT on the switched
+side (O16 log 52: 0 V until the main switch, and decaying after it). A
+disconnected AVBAT or backup drops out of the diode-OR; without AVBAT the PMU
+can't boost or crank. With nothing left to power the board, its monitors go
+quiet and a message says so; the autopilot carries on regardless.
 
 The generator RPM is RPM1 (the EFI that sitl_engine.lua publishes). The starter
 is on while its relay's simulated GPIO pin is set: the bit of SIM_PIN_MASK that
@@ -49,7 +54,7 @@ local function bind_add_param(name, idx, default_value)
     return bind_param(PARAM_TABLE_PREFIX .. name)
 end
 
-assert(param:add_table(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, 12), 'could not add ' .. string.sub(PARAM_TABLE_PREFIX, 1, -2) .. ' param table')
+assert(param:add_table(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, 14), 'could not add ' .. string.sub(PARAM_TABLE_PREFIX, 1, -2) .. ' param table')
 --[[
   // @Param: SIM_PWR_BRD_W
   // @DisplayName: Board load
@@ -136,9 +141,31 @@ local BKP_RX = bind_add_param('BKP_RX', 11, 1.0)
   // @Description: Any change of value puts every simulated pack (AVBAT, backup, both VTOL packs) back to its starting charge, rested: the backup at 68%, the rest full
 --]]
 local RESET = bind_add_param('RESET', 12, 0)
+--[[
+  // @Param: SIM_PWR_HOLD
+  // @DisplayName: Hold pack charge
+  // @Description: The packs with their bits set keep their charge as they're used, as if their capacity were unlimited. Their voltage still sags under load.
+  // @Bitmask: 0:Left VTOL pack, 1:Right VTOL pack, 2:AVBAT, 3:Backup battery
+--]]
+local HOLD = bind_add_param('HOLD', 13, 0)
+--[[
+  // @Param: SIM_PWR_DISCON
+  // @DisplayName: Power disconnected
+  // @Description: Disconnect packs, or turn the main switch off: the PMU, the payload and the ECU lose power, and AVBAT's monitor reads 0 V. Set at boot, and clear the bits in order, to walk through the preflight power-up.
+  // @Bitmask: 0:Left VTOL pack, 1:Right VTOL pack, 2:AVBAT, 3:Backup battery, 4:Main switch off
+--]]
+local DISCON = bind_add_param('DISCON', 14, 0)
 
 local FAIL_PMU = 1
 local FAIL_GENERATOR = 2
+-- SIM_PWR_HOLD and SIM_PWR_DISCON bits (the VTOL pack bits are for
+-- sitl_escs_ottano.lua; the main switch bit for sitl_engine.lua too)
+local HOLD_AVBAT = 4
+local HOLD_BACKUP = 8
+local DISCON_AVBAT = 4
+local DISCON_BACKUP = 8
+local DISCON_MAIN = 16
+local NO_POWER_WARN_MS = 10000
 
 -- Constants
 -- (these could be parameters, but they don't need to change in flight, and the
@@ -210,6 +237,7 @@ local generating = false
 local vin_low = false
 local avbat_voltage = avbat.terminal_voltage(0)
 local crank_s = 0 -- how long the starter has been on
+local no_power_warned_ms = nil
 local warned = {}
 
 local states = {}
@@ -259,6 +287,9 @@ local function handle_injects()
     end
     avbat.set_resistance_mult(AVB_RX:get())
     backup.set_resistance_mult(BKP_RX:get())
+    local hold = math.floor(HOLD:get())
+    avbat.set_hold(hold & HOLD_AVBAT ~= 0)
+    backup.set_hold(hold & HOLD_BACKUP ~= 0)
 
     -- The starter runs through the PMU: fail it along with the PMU, and put
     -- it back after
@@ -357,11 +388,15 @@ local function update()
     local board_w = math.max(BRD_W:get(), 0)
     local payload_w = math.max(PLD_W:get(), 0)
     local rpm = RPM:get_rpm(0) or 0
-    local starting = starter_on() and not pmu_failed
+    local discon = math.floor(DISCON:get())
+    local main_off = discon & DISCON_MAIN ~= 0
+    local avbat_in = discon & DISCON_AVBAT == 0
+    local backup_in = discon & DISCON_BACKUP == 0
+    local starting = starter_on() and not pmu_failed and not main_off and avbat_in
 
     -- Generator cut-in, with hysteresis
     local cutin = CUTIN:get() + CUT_SLP:get() * (board_w + payload_w) / 100
-    if pmu_failed or starting or (fail & FAIL_GENERATOR) ~= 0 then
+    if pmu_failed or main_off or starting or (fail & FAIL_GENERATOR) ~= 0 then
         generating = false
     elseif generating and rpm < cutin - CUT_HYS:get() then
         generating = false
@@ -375,7 +410,7 @@ local function update()
     elseif not vin_low and avbat_voltage < PMU_VIN_MIN then
         vin_low = true
     end
-    local pmu_on = not pmu_failed and (generating or not vin_low)
+    local pmu_on = not pmu_failed and not main_off and (generating or (avbat_in and not vin_low))
 
     local i_start = starter_current(starting, dt)
     local i_avbat, i_backup, i_primary, bus
@@ -396,26 +431,48 @@ local function update()
         end
         i_avbat = i_start + i_boost
     else
-        -- Payload dark; the batteries carry the board through their diodes
-        local currents
-        bus, currents = diode_or({
-            {v = avbat.terminal_voltage(i_start), r = avbat.resistance()},
-            {v = backup.terminal_voltage(0), r = backup.resistance()},
-        }, board_w)
-        i_avbat = i_start + currents[1]
-        i_backup = currents[2]
-        i_primary = currents[1]
-        bus = bus + gaussian_noise(BUS_NOISE_OFF)
+        -- Payload dark; the connected batteries carry the board through their
+        -- diodes
+        local sources = {}
+        if avbat_in then
+            table.insert(sources, {name = 'avbat', v = avbat.terminal_voltage(i_start), r = avbat.resistance()})
+        end
+        if backup_in then
+            table.insert(sources, {name = 'backup', v = backup.terminal_voltage(0), r = backup.resistance()})
+        end
+        i_avbat, i_backup, i_primary, bus = i_start, 0, 0, 0
+        if #sources > 0 then
+            local currents
+            bus, currents = diode_or(sources, board_w)
+            for k, s in ipairs(sources) do
+                if s.name == 'avbat' then
+                    i_avbat = i_avbat + currents[k]
+                    i_primary = currents[k]
+                else
+                    i_backup = currents[k]
+                end
+            end
+            bus = bus + gaussian_noise(BUS_NOISE_OFF)
+        end
     end
+    local board_powered = pmu_on or (avbat_in or backup_in)
 
     avbat_voltage = avbat.terminal_voltage(i_avbat)
     avbat.step(i_avbat, dt)
     backup.step(i_backup, dt)
 
     local avbat_reported = math.floor(avbat_voltage / AVBAT_RESOLUTION + 0.5) * AVBAT_RESOLUTION
-    publish(AVBAT_IDX, avbat_reported, gaussian_noise(BATT2_NOISE))
-    publish(BUS_BKP_IDX, bus, BATT6_OFFSET + i_backup + gaussian_noise(BATT6_NOISE))
-    publish(BUS_PRI_IDX, bus, i_primary + gaussian_noise(BATT7_NOISE))
+    if board_powered then
+        -- AVBAT's monitor reads the switched side of AVBAT
+        publish(AVBAT_IDX, (not main_off and avbat_in) and avbat_reported or 0, gaussian_noise(BATT2_NOISE))
+        publish(BUS_BKP_IDX, bus, BATT6_OFFSET + i_backup + gaussian_noise(BATT6_NOISE))
+        publish(BUS_PRI_IDX, bus, i_primary + gaussian_noise(BATT7_NOISE))
+        no_power_warned_ms = nil
+    elseif not no_power_warned_ms or (now_ms - no_power_warned_ms):tofloat() >= NO_POWER_WARN_MS then
+        -- The aircraft would be dark; the autopilot here carries on
+        gcs:send_text(2, 'SITL: no avionics power')
+        no_power_warned_ms = now_ms
+    end
 end
 
 -- Wrapper to handle errors
