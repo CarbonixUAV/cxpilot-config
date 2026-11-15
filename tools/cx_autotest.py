@@ -815,7 +815,8 @@ class AutoTestCarbonix(AutoTestQuadPlane):
 
         The PMU boosts from AVBAT below the generator's cut-in RPM and
         generates above it; cranking sags AVBAT; the injects fail the PMU or
-        the generator, and set AVBAT's charge.
+        the generator, set and hold AVBAT's charge, and disconnect the
+        sources and the main switch, down to a cold boot on AVBAT alone.
         '''
         if not self.has_parameter('SIM_PWR_CUTIN'):
             self.progress('No simulated avionics power on this frame; skipping')
@@ -926,6 +927,53 @@ class AutoTestCarbonix(AutoTestQuadPlane):
         self.wait_battery_voltage(2, v_end + 0.12, 26, timeout=5)
         self.set_rc(3, 1000)
 
+        self.start_subtest('Holding AVBAT keeps its charge')
+        self.set_parameter('SIM_PWR_HOLD', 4)
+        self.delay_sim_time(30)
+        v_start = self.battery_voltage(2)
+        self.delay_sim_time(120)
+        v_end = self.battery_voltage(2)
+        self.progress(f'AVBAT held: {v_start:.3f} V to {v_end:.3f} V over 120 s boosting')
+        if abs(v_end - v_start) > 0.03:
+            raise NotAchievedException('AVBAT drained while held')
+        self.set_parameter('SIM_PWR_HOLD', 0)
+
+        self.start_subtest("Main switch off: the board runs on AVBAT, and the engine can't run")
+        self.set_parameter('SIM_PWR_DISCON', 16)
+        self.delay_sim_time(3)
+        bus, _ = self.battery_samples(6, 3)
+        _, pri_amps = self.battery_samples(7, 3)
+        self.progress(f'Main switch off: bus {statistics.mean(bus):.2f} V, BATT7 {statistics.mean(pri_amps):.2f} A')
+        if not 22.5 < statistics.mean(bus) < 25:
+            raise NotAchievedException("The bus isn't on AVBAT's diode")
+        if statistics.mean(pri_amps) < 2.5:
+            raise NotAchievedException("AVBAT isn't carrying the board")
+        # AVBAT's monitor measures the switched side
+        self.wait_battery_voltage(2, 0, 0.5, timeout=5)
+        # The ECU has no power, so its data stops. RPM1 can't show it: it comes
+        # from the EFI, and ArduPilot keeps the last RPM an unhealthy EFI gave.
+        tstart = self.get_sim_time()
+        while self.assert_receive_message('EFI_STATUS').health:
+            if self.get_sim_time_cached() - tstart > 5:
+                raise NotAchievedException('The EFI still reports with the main switch off')
+        self.delay_sim_time(10)
+        self.run_cmd(mavutil.mavlink.MAV_CMD_DO_ENGINE_CONTROL, p1=0)
+        # Nothing left to power the board: a message says so
+        self.context_push()
+        self.context_collect('STATUSTEXT')
+        self.set_parameter('SIM_PWR_DISCON', 16 | 4 | 8)  # AVBAT and the backup out too
+        self.wait_text('SITL: no avionics power', check_context=True, timeout=5)
+        self.context_pop()
+        self.delay_sim_time(15)
+        held = self.battery_voltage(8, duration=1)
+        self.set_parameter('SIM_PWR_DISCON', 0)
+        self.wait_battery_voltage(6, 27.0, 27.7, timeout=5)
+        # The ECU primes the fuel pump as it powers up, and reports the engine
+        # stopped: it couldn't run, nor be restarted, while the switch was off
+        self.wait_battery_voltage(8, held + 15, held + 60, timeout=5)
+        self.wait_rpm(1, 0, 300, timeout=5)
+        self.start_engine()
+
         self.start_subtest('A PMU failure drops the bus to the batteries and BATT6 RTLs')
         self.context_push()
         self.context_collect('STATUSTEXT')
@@ -962,8 +1010,44 @@ class AutoTestCarbonix(AutoTestQuadPlane):
         self.wait_battery_voltage(6, 27.0, 27.7, timeout=5)
         self.context_pop()
 
-        # Clear the latched battery failsafe
+        self.start_subtest('A cold boot on AVBAT alone, then the power-up in order')
+        left_mask = self.get_parameter('BATT4_ESC_MASK')
+        right_mask = self.get_parameter('BATT5_ESC_MASK')
+        held = self.get_parameter('SIM_ICE_FP_NOM') - 38
+        # Everything but AVBAT out, then a reboot (which also clears the
+        # latched battery failsafe)
+        self.set_parameter('SIM_PWR_DISCON', 1 | 2 | 8 | 16)
         self.reboot_sitl()
+        self.context_set_message_rate_hz(mavutil.mavlink.MAVLINK_MSG_ID_BATTERY_STATUS, 100)
+        self.wait_battery_voltage(6, 22.5, 25, timeout=10)
+        self.wait_battery_voltage(2, 0, 0.5, timeout=5)
+        if self.assert_receive_message('EFI_STATUS', timeout=5).health:
+            raise NotAchievedException('The EFI reports with the main switch off')
+        # ArduPilot still sends the ESCs' telemetry for SITL's RPM, so look
+        # for the packs' voltage rather than the messages
+        try:
+            v = self.esc_pack_voltage(int(left_mask) | int(right_mask))
+        except NotAchievedException:
+            v = 0
+        if v > 1:
+            raise NotAchievedException(f'The ESCs report {v:.1f} V with both packs out')
+        self.set_parameter('SIM_PWR_DISCON', 1 | 2 | 8)  # the main switch on
+        self.wait_battery_voltage(6, 27.0, 27.7, timeout=5)
+        self.wait_battery_voltage(2, 23.8, 25.1, timeout=5)
+        self.wait_battery_voltage(8, held + 15, held + 60, timeout=5)
+        self.set_parameter('SIM_PWR_DISCON', 1 | 8)  # the right pack in
+        self.delay_sim_time(2)
+        v = self.esc_pack_voltage(right_mask)
+        self.progress(f'Right pack in: {v:.2f} V')
+        if not 49.8 < v < 50.6:
+            raise NotAchievedException('The right pack is not reporting full')
+        self.set_parameter('SIM_PWR_DISCON', 8)  # and the left
+        self.delay_sim_time(2)
+        v = self.esc_pack_voltage(left_mask)
+        self.progress(f'Left pack in: {v:.2f} V')
+        if not 49.8 < v < 50.6:
+            raise NotAchievedException('The left pack is not reporting full')
+        self.set_parameter('SIM_PWR_DISCON', 0)  # and the backup
 
     def VTOLPacks(self):
         '''Test the simulated VTOL packs (BATT4, BATT5, and BATT1 over them).'''
@@ -1024,7 +1108,18 @@ class AutoTestCarbonix(AutoTestQuadPlane):
         self.assert_no_text(warning, timeout=12, check_context=True)
         self.context_pop()
 
-        self.start_subtest('Packs sag in the hover and recover after')
+        self.start_subtest('A disconnected pack goes quiet')
+        self.context_push()
+        self.context_collect('STATUSTEXT')
+        self.set_parameter('SIM_PWR_DISCON', 1)  # the left pack
+        self.wait_text('CX_BIT: ESC [0-9]+ Telemetry Lost', regex=True, check_context=True, timeout=15)
+        self.context_clear_collection('STATUSTEXT')
+        self.set_parameter('SIM_PWR_DISCON', 0)
+        self.wait_text('CX_BIT: ESC [0-9]+ Telemetry Recovered', regex=True, check_context=True, timeout=15)
+        self.context_pop()
+
+        self.start_subtest('Packs sag in the hover and recover after; a held one keeps its charge')
+        self.set_parameter('SIM_PWR_HOLD', 1)  # the left pack
         if self.get_parameter('ICE_ENABLE'):
             self.prepare_engine(rapid_warmup=True)
         self.wait_ready_to_arm()
@@ -1053,6 +1148,10 @@ class AutoTestCarbonix(AutoTestQuadPlane):
             raise NotAchievedException('Left pack did not step up after the motors stopped')
         if crept - rested < 0.15:
             raise NotAchievedException('Left pack did not creep up after the motors stopped')
+        right = self.esc_pack_voltage(right_mask)
+        self.progress(f'Rested: left (held) {crept:.2f} V, right {right:.2f} V')
+        if crept - right < 0.4:
+            raise NotAchievedException('The held left pack ran down like the right')
 
     def FuelPressure(self):
         '''Test the simulated fuel pressure (BATT8, kPa in the voltage field).'''
