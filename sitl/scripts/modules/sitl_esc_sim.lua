@@ -74,6 +74,23 @@ function esc_sim.new(c)
     local Q_M_PWM_MIN = param:get('Q_M_PWM_MIN') or 1000
     local Q_M_PWM_MAX = param:get('Q_M_PWM_MAX') or 2000
     local Q_M_SPIN_ARM = param:get('Q_M_SPIN_MIN') or 0.1
+    local SPIN_MIN = bind_param('Q_M_SPIN_MIN')
+    local SPIN_MAX = bind_param('Q_M_SPIN_MAX')
+    local THST_EXPO = bind_param('Q_M_THST_EXPO')
+
+    ---A motor's thrust, as a fraction of its maximum, from its output:
+    ---ArduPilot's thrust curve without its battery compensation. The
+    ---simulators don't sag their own battery, so this is what they produce;
+    ---actuator_to_thrust instead gives the thrust ArduPilot commanded, which
+    ---rises as it makes up for a modeled sag.
+    ---@param actuator number
+    ---@return number
+    local function motor_thrust(actuator)
+        local x = (actuator - SPIN_MIN:get()) / (SPIN_MAX:get() - SPIN_MIN:get())
+        x = math.min(math.max(x, 0), 1)
+        local expo = THST_EXPO:get()
+        return x * (expo * x - (expo - 1))
+    end
 
     local function get_air_temperature()
         -- Standard lapse rate is 6.5 degC per 1000 m
@@ -109,6 +126,7 @@ function esc_sim.new(c)
     local function new_esc(servo_func)
         local esc = {}
         esc.servo_func = servo_func
+        esc.motor_thrust = 0 -- fraction of full thrust, without battery compensation
         esc.thrust = 0
         esc.rpm = 0
         esc.current = 0      -- what the ESC reports, noise included
@@ -141,6 +159,7 @@ function esc_sim.new(c)
         for _, esc in ipairs(self.escs) do
             local actuator = get_output_scaled(esc.servo_func)
             if actuator then -- keep the old thrust value if the get_output race condition hits this iteration
+                esc.motor_thrust = motor_thrust(actuator)
                 esc.thrust = motors:actuator_to_thrust(actuator)
                 -- Add the small amount of thrust from the motor spinning at min
                 esc.thrust = esc.thrust * (1 - (MIN_RPM / MAX_RPM)^2) + math.min(actuator, Q_M_SPIN_ARM)*(MIN_RPM / MAX_RPM)^2/Q_M_SPIN_ARM
