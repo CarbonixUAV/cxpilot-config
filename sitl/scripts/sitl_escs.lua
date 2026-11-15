@@ -107,7 +107,7 @@ local function get_output_scaled(servo_func)
         return nil
     end
     if SIM_ENGINE_FAIL:get() & (1 << chan) ~= 0 then
-        pwm = pwm * SIM_ENGINE_MUL:get()
+        pwm = 1000 + (pwm - 1000) * SIM_ENGINE_MUL:get()
     end
     local actuator = (pwm - Q_M_PWM_MIN) / (Q_M_PWM_MAX - Q_M_PWM_MIN)
     return math.min(1, math.max(0, actuator))
