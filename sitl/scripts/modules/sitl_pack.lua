@@ -65,6 +65,7 @@ end
 function pack.new(spec)
     local self = {}
     local soc = 1.0 -- 0 to 1
+    local hold = false
     local vp = {}   -- voltage across each RC pair
     local r_mult = 1.0
 
@@ -80,6 +81,13 @@ function pack.new(spec)
     ---@param pct number
     function self.set_soc(pct)
         soc = math.min(math.max(pct / 100, min_soc(spec.ocv)), 1)
+    end
+
+    ---Hold the state of charge where it is (or let it run down again). The
+    ---polarization, and so the sag, carries on as before.
+    ---@param on boolean
+    function self.set_hold(on)
+        hold = on
     end
 
     ---@return number
@@ -143,7 +151,9 @@ function pack.new(spec)
             local a = math.exp(-dt / rc.tau)
             vp[k] = vp[k] * a + current * rc.r * r_mult * (1 - a)
         end
-        soc = math.max(soc - current * dt / 3600 / spec.capacity_ah, min_soc(spec.ocv))
+        if not hold then
+            soc = math.max(soc - current * dt / 3600 / spec.capacity_ah, min_soc(spec.ocv))
+        end
     end
 
     self.reset()

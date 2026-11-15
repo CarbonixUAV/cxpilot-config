@@ -140,6 +140,7 @@ function esc_sim.new(c)
         esc.servo_func = servo_func
         esc.motor_thrust = 0 -- fraction of full thrust, without battery compensation, as delivered
         esc.supply_ratio = 1 -- the output reaching the physics is scaled by this (see sim:set_servo_scale)
+        esc.powered = true -- an unpowered ESC sends no telemetry
         esc.thrust = 0
         esc.rpm = 0
         esc.current = 0      -- what the ESC reports, noise included
@@ -236,7 +237,7 @@ function esc_sim.new(c)
 
         -- Send the telemetry
         for i, esc in ipairs(self.escs) do
-            if TELEM_FAIL_MASK:get() & (1 << (i - 1)) == 0 then
+            if esc.powered and TELEM_FAIL_MASK:get() & (1 << (i - 1)) == 0 then
                 local data_mask = 0x0D -- voltage, current, temperature
                 esc_telem:update_telem_data(i-1, esc.telem_data, data_mask)
                 esc_telem:update_rpm(i-1, esc.rpm, 0)
