@@ -1200,6 +1200,20 @@ class AutoTestCarbonix(AutoTestQuadPlane):
         self.set_parameter('SIM_ICE_FP_NOM', nominal)
         self.wait_battery_voltage(8, held - 2, held + 3, timeout=10)
 
+        self.start_subtest('An ECU failure kills the engine and the pump, and stops the EFI')
+        self.start_engine()
+        self.wait_battery_voltage(8, nominal - 3, nominal + 2, timeout=15)
+        self.set_parameter('SIM_ICE_ECU_FAIL', 1)
+        # RPM1 can't show the engine dying: it comes from the EFI, and
+        # ArduPilot keeps the last RPM an unhealthy EFI gave (SW-954)
+        tstart = self.get_sim_time()
+        while self.assert_receive_message('EFI_STATUS').health:
+            if self.get_sim_time_cached() - tstart > 5:
+                raise NotAchievedException('The EFI still reports with the ECU failed')
+        self.wait_battery_voltage(8, held - 2, nominal - 15, timeout=10)
+        self.set_parameter('SIM_ICE_ECU_FAIL', 0)
+        self.wait_rpm(1, 0, 300, timeout=5)
+
     def _pretest_hook(self):
         self.install_terrain_handlers_context()
 
