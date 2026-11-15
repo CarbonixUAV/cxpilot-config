@@ -7,7 +7,6 @@ ARSPD_TYPE,2
 ARSPD2_OFFSET,2013
 ARSPD2_PIN,2
 ARSPD2_TYPE,2
-BATT_OPTIONS,0 # Disable reporting sag corrected voltage, because it already is (due to RF bug)
 # AVBAT (2), the bus (6, 7) and fuel pressure (8) come from sitl_power.lua and
 # sitl_engine.lua through the scripting backend; their failsafes stay as is
 @delete BATT2_MONITOR
@@ -24,7 +23,8 @@ BATT7_MONITOR,29
 @delete BATT8_*
 BATT8_MONITOR,29
 @delete BATT9_*
-# Batt9 serves to pass the SITL battery info into the ESC lua script
+# Batt9 reads the simulator's own battery, only for sitl_escs_ottano.lua's
+# warning when RealFlight isn't set to unlimited fuel
 BATT9_MONITOR,4
 @delete CAN_*
 @delete EFI_*
