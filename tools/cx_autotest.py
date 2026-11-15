@@ -1214,6 +1214,99 @@ class AutoTestCarbonix(AutoTestQuadPlane):
         self.set_parameter('SIM_ICE_ECU_FAIL', 0)
         self.wait_rpm(1, 0, 300, timeout=5)
 
+    def FuelLevel(self):
+        '''Test the simulated fuel tank and level sensor (BATT3, kg in the voltage field).
+
+        The level reads through O16's calibration and sloshes with the specific
+        force; a dry tank starves the engine.
+        '''
+        if not self.has_parameter('SIM_ICE_FUEL_KG'):
+            self.progress('No simulated fuel tank on this frame; skipping')
+            return
+
+        # A full tank and a stopped engine
+        self.reboot_sitl()
+        self.context_set_message_rate_hz(mavutil.mavlink.MAVLINK_MSG_ID_BATTERY_STATUS, 50)
+        self.context_set_message_rate_hz(mavutil.mavlink.MAVLINK_MSG_ID_EFI_STATUS, 10)
+        mul = self.get_parameter('SIM_ICE_FL_MUL')
+        ofs = self.get_parameter('SIM_ICE_FL_OFS')
+        nominal = self.get_parameter('SIM_ICE_FP_NOM')
+
+        self.start_subtest('A full tank reads through the calibration')
+        expect = mul * 9.5 + ofs
+        self.wait_battery_voltage(3, expect - 0.15, expect + 0.15, timeout=10)
+
+        self.start_subtest('Changing the load drains the tank at once')
+        self.set_parameter('SIM_ICE_FUEL_KG', 5)
+        expect = mul * 5 + ofs
+        self.wait_battery_voltage(3, expect - 0.15, expect + 0.15, timeout=5)
+
+        self.start_subtest('A reboot starts with the load set')
+        self.reboot_sitl()
+        self.context_set_message_rate_hz(mavutil.mavlink.MAVLINK_MSG_ID_BATTERY_STATUS, 50)
+        self.wait_battery_voltage(3, expect - 0.15, expect + 0.15, timeout=10)
+        # For its first 5 s the fuel follows the tilt at once: SITL's drop
+        # onto the gear at boot would otherwise set it sloshing
+        self.delay_sim_time(5)
+
+        self.start_subtest('A perfect sensor reads the fuel on board')
+        self.set_parameters({'SIM_ICE_FL_MUL': 1, 'SIM_ICE_FL_OFS': 0})
+        self.wait_battery_voltage(3, 4.85, 5.15, timeout=5)
+
+        self.start_subtest('The level sloshes with the specific force, and settles slowly')
+        # An accelerometer bias tilts the specific force without moving the
+        # aircraft: forward, like a nose-up attitude or speeding up
+        rest = self.battery_voltage(3)
+        self.set_parameter('SIM_ACC1_BIAS_X', 1.0)
+        tstart = self.get_sim_time()
+        first = self.battery_voltage(3, duration=1)
+        self.progress(f'At rest {rest:.2f} kg; over the first second {first:.2f} kg')
+        if first - rest > 0.3:
+            raise NotAchievedException('The level jumped with the tilt')
+        # O16's tank: about 15 kg per unit f_x/-f_z with 5 kg on board, so
+        # about 1.5 kg for this bias
+        self.wait_battery_voltage(3, rest + 1.2, rest + 1.8, timeout=60)
+        settled = self.get_sim_time() - tstart
+        self.progress(f'Settled after {settled:.1f} s')
+        if settled < 5:
+            raise NotAchievedException('The level settled too fast')
+        self.set_parameter('SIM_ACC1_BIAS_X', 0)
+        self.wait_battery_voltage(3, rest - 0.15, rest + 0.15, timeout=60)
+
+        self.start_subtest('Running dry: the pressure falls, then the engine quits')
+        self.start_engine()
+        self.wait_battery_voltage(8, nominal - 3, nominal + 2, timeout=15)
+        # Not set_parameter: its wait for the readback would let the engine quit unwatched
+        self.send_set_parameter_direct('SIM_ICE_FUEL_KG', 0)
+        tstart = self.get_sim_time()
+        t_low = None
+        while True:
+            m = self.mav.recv_match(type=['BATTERY_STATUS', 'EFI_STATUS'], blocking=True, timeout=1)
+            now = self.get_sim_time_cached()
+            if now - tstart > 10:
+                raise NotAchievedException('The engine still runs on a dry tank')
+            if m is None:
+                continue
+            if m.get_type() == 'BATTERY_STATUS':
+                if m.id == 7 and t_low is None and self.battery_status_voltage(m) < nominal - 20:
+                    t_low = now
+            elif m.rpm < 1000:
+                break
+        if t_low is None:
+            raise NotAchievedException('The engine quit before the fuel pressure fell')
+        self.progress(f'The engine quit {now - t_low:.2f} s after the pressure fell')
+        if now - t_low > 1.5:
+            raise NotAchievedException('The engine ran on too long without fuel pressure')
+        # An empty tank reads Fuse1's floor
+        self.wait_battery_voltage(3, 0.6, 0.75, timeout=5)
+
+        self.start_subtest('Refueled, the engine starts again')
+        self.run_cmd(mavutil.mavlink.MAV_CMD_DO_ENGINE_CONTROL, p1=0)
+        self.set_parameter('SIM_ICE_FUEL_KG', 9.5)
+        self.start_engine()
+        self.wait_battery_voltage(8, nominal - 3, nominal + 2, timeout=15)
+        self.wait_battery_voltage(3, 9.35, 9.65, timeout=5)
+
     def _pretest_hook(self):
         self.install_terrain_handlers_context()
 
@@ -1232,6 +1325,7 @@ class AutoTestCarbonix(AutoTestQuadPlane):
             self.AvionicsPower,
             self.VTOLPacks,
             self.FuelPressure,
+            self.FuelLevel,
         ]
 
     def tests(self) -> list[Any]:
