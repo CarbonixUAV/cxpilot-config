@@ -27,8 +27,11 @@ pack.OCV_LIION = {
 
 -- LiPo (VTOL packs). 4.20 V full and 3.17 V empty per cell (12S: 50.4 V to
 -- 38 V). Slopes match the O16 log: about 0.7 V/Ah per 16 Ah pack near full,
--- 0.35 V/Ah mid-pack.
+-- 0.35 V/Ah mid-pack. Below empty the voltage collapses, as a LiPo's does in
+-- its last few percent, so a flat pack can't hold up the aircraft (a guess:
+-- no log goes this deep).
 pack.OCV_LIPO = {
+    {-8, 2.500}, {-5, 2.800}, {-2, 3.050},
     {0, 3.170}, {5, 3.480}, {10, 3.600}, {15, 3.660}, {20, 3.700},
     {25, 3.730}, {30, 3.750}, {35, 3.770}, {40, 3.790}, {45, 3.810},
     {50, 3.835}, {55, 3.855}, {60, 3.877}, {65, 3.900}, {70, 3.930},
@@ -48,6 +51,12 @@ local function interpolate(tbl, x)
         end
     end
     return tbl[#tbl][2]
+end
+
+---The lowest state of charge an OCV table goes to, as a fraction (below 0 if
+---it models discharging past empty).
+local function min_soc(ocv)
+    return math.min(ocv[1][1] / 100, 0)
 end
 
 ---Create a pack.
@@ -70,7 +79,7 @@ function pack.new(spec)
     ---Set the state of charge, leaving the polarization as it is.
     ---@param pct number
     function self.set_soc(pct)
-        soc = math.min(math.max(pct / 100, 0), 1)
+        soc = math.min(math.max(pct / 100, min_soc(spec.ocv)), 1)
     end
 
     ---@return number
@@ -134,7 +143,7 @@ function pack.new(spec)
             local a = math.exp(-dt / rc.tau)
             vp[k] = vp[k] * a + current * rc.r * r_mult * (1 - a)
         end
-        soc = math.max(soc - current * dt / 3600 / spec.capacity_ah, 0)
+        soc = math.max(soc - current * dt / 3600 / spec.capacity_ah, min_soc(spec.ocv))
     end
 
     self.reset()
