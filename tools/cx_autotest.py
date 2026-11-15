@@ -1527,11 +1527,62 @@ class AutoTestRealFlight(AutoTestCarbonix):
         self.wait_rpm(1, 0, 300, timeout=30)
         self.wait_battery_voltage(8, nominal_fp - 40, nominal_fp - 35, timeout=60)
 
+    def FlatPackHover(self):
+        '''Test that flat VTOL packs can't hold a hover: the packs' sag reaches RealFlight's physics.'''
+        if not self.has_parameter('SIM_VTB_SOC_L'):
+            self.progress('No simulated VTOL packs on this frame; skipping')
+            return
+
+        self.set_parameter('BIT_PREARM_DIS', 0b100)  # skip the engine warm-up and run-up checks
+        self.reboot_sitl()
+        self.context_set_message_rate_hz(mavutil.mavlink.MAVLINK_MSG_ID_BATTERY_STATUS, 50)
+        left_mask = self.get_parameter('BATT4_ESC_MASK')
+
+        self.set_rc(3, 1000)
+        self.change_mode('QHOVER')
+        self.run_cmd(mavutil.mavlink.MAV_CMD_DO_ENGINE_CONTROL, p1=1)
+        self.wait_rpm(1, 1000, 3500, timeout=20)
+        self.wait_ready_to_arm(timeout=120)
+
+        self.start_subtest('Full packs hold the hover')
+        self.change_mode('QLOITER')
+        self.arm_vehicle()
+        self.set_rc(3, 1800)
+        self.wait_altitude(30, 60, relative=True, timeout=60)
+        self.set_rc(3, 1500)
+        self.delay_sim_time(10)
+        alt = self.get_altitude(relative=True)
+        self.progress(f'Hovering at {alt:.1f} m, left pack {self.esc_pack_voltage(left_mask):.2f} V')
+
+        self.start_subtest('Flat packs lose the hover')
+        self.set_sim_charge('SIM_VTB_SOC_L', 0)
+        self.set_sim_charge('SIM_VTB_SOC_R', 0)
+        tstart = self.get_sim_time()
+        while True:
+            now_alt = self.get_altitude(relative=True)
+            volts = self.esc_pack_voltage(left_mask, duration=1)
+            self.progress(f'{self.get_sim_time() - tstart:.0f} s: {now_alt:.1f} m, left pack {volts:.2f} V')
+            if now_alt < alt - 8:
+                break
+            if self.get_sim_time() - tstart > 120:
+                raise NotAchievedException('Held the hover on flat packs')
+
+        self.start_subtest('Fresh packs recover it')
+        # ArduPilot's altitude target followed the aircraft down while the
+        # motors were saturated, so climb back to show the thrust is back
+        self.reset_sim_packs()
+        self.set_rc(3, 1800)
+        self.wait_altitude(alt, alt + 30, relative=True, timeout=60)
+        self.set_rc(3, 1500)
+        self.change_mode('QLAND')
+        self.wait_disarmed(timeout=120)
+
     def _raw_tests(self) -> list[Union[Callable[[], None], Test]]:
         return [
             self.RealFlightHover,
             self.EngineOutScript,
             self.PowerModel,
+            self.FlatPackHover,
         ]
 
 
