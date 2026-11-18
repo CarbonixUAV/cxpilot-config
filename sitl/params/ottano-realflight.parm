@@ -33,6 +33,7 @@ LOG_REPLAY,0 # causes random crashes on the Cygwin SITL
 RNGFND1_PIN,0
 RNGFND1_SCALING,40
 RNGFND1_TYPE,100
+RPM2_TYPE,10 # RealFlight's pusher RPM; sitl_engine.lua reports it instead of faking one. DISABLE_CHECKS: the SITL type isn't in the metadata
 @delete SCR_*_CHECKSUM
 SCR_HEAP_SIZE,300000 # SITL runs more scripts and needs more heap space
 @delete SERIAL* # SITL does not need to replicate serial assignments
