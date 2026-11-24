@@ -38,78 +38,6 @@
         </waf_extra_hwdef>
     </flight_controller>
     <cpn_list>
-        <cpn id="11">
-            <bus>1</bus>
-            <board_name>aero.currawong.esc.hs</board_name>
-        </cpn>
-        <cpn id="12">
-            <bus>1</bus>
-            <board_name>aero.currawong.esc.hs</board_name>
-        </cpn>
-        <cpn id="13">
-            <bus>1</bus>
-            <board_name>aero.currawong.esc.hs</board_name>
-        </cpn>
-        <cpn id="14">
-            <bus>1</bus>
-            <board_name>aero.currawong.esc.hs</board_name>
-        </cpn>
-        <cpn id="25">
-            <bus>2</bus>
-            <board_name>aero.currawong.esc.hs</board_name>
-        </cpn>
-        <cpn id="26">
-            <bus>2</bus>
-            <board_name>aero.currawong.esc.hs</board_name>
-        </cpn>
-        <cpn id="27">
-            <bus>2</bus>
-            <board_name>aero.currawong.esc.hs</board_name>
-        </cpn>
-        <cpn id="28">
-            <bus>2</bus>
-            <board_name>aero.currawong.esc.hs</board_name>
-        </cpn>
-        <cpn id="41">
-            <bus>2</bus>
-            <board_name>MKS-HBL6625:006</board_name>
-            <firmware_commit>b120233</firmware_commit>
-        </cpn>
-        <cpn id="42">
-            <bus>2</bus>
-            <board_name>MKS-HBL6625:011</board_name>
-            <firmware_commit>b120233</firmware_commit>
-        </cpn>
-        <cpn id="43">
-            <bus>2</bus>
-            <board_name>MKS-HBL3850:010</board_name>
-            <firmware_commit>9214537</firmware_commit>
-        </cpn>
-        <cpn id="31">
-            <bus>1</bus>
-            <board_name>MKS-HBL6625:012</board_name>
-            <firmware_commit>b120233</firmware_commit>
-        </cpn>
-        <cpn id="32">
-            <bus>1</bus>
-            <board_name>MKS-HBL6625:015</board_name>
-            <firmware_commit>b120233</firmware_commit>
-        </cpn>
-        <cpn id="33">
-            <bus>1</bus>
-            <board_name>MKS-HBL3850:013</board_name>
-            <firmware_commit>9214537</firmware_commit>
-        </cpn>
-        <cpn id="34">
-            <bus>1</bus>
-            <board_name>org.ardupilot.HolybroG4_GPS</board_name>
-            <firmware_commit>6e519848</firmware_commit>
-        </cpn>
-        <cpn id="44">
-            <bus>2</bus>
-            <board_name>org.ardupilot.HolybroG4_GPS</board_name>
-            <firmware_commit>6e519848</firmware_commit>
-        </cpn>
         <cpn id="35">
             <bus>1</bus>
             <board_name>Ottano-Fuse1_CarbonixF405</board_name>
@@ -126,19 +54,6 @@
             <waf_board>CarbonixF405</waf_board>
             <waf_defaults>cpn_params/Ottano-Fuse2.parm</waf_defaults>
         </cpn>
-        <cpn id="36">
-            <bus>1</bus>
-            <board_name>org.ardupilot.MatekL431-Airspeed</board_name>
-        </cpn>
-        <cpn id="46">
-            <bus>2</bus>
-            <board_name>org.ardupilot.MatekL431-Airspeed</board_name>
-        </cpn>
-        <cpn id="38">
-            <bus>1</bus>
-            <board_name>org.ardupilot.MatekL431-BattMon</board_name>
-            <firmware_commit>9c6f307f</firmware_commit>
-        </cpn>
         <cpn id="47">
             <bus>2</bus>
             <board_name>Ottano-EIB_MatekL431</board_name>
@@ -150,15 +65,114 @@
         </cpn>
     </cpn_list>
     <esc_list>
+        <esc id="11">
+            <bus>1</bus>
+            <board_name>aero.currawong.esc.hs</board_name>
+            <firmware_commit>cf5907d</firmware_commit>
+        </esc>
+        <esc id="12">
+            <bus>1</bus>
+            <board_name>aero.currawong.esc.hs</board_name>
+            <firmware_commit>cf5907d</firmware_commit>
+        </esc>
+        <esc id="13">
+            <bus>1</bus>
+            <board_name>aero.currawong.esc.hs</board_name>
+            <firmware_commit>cf5907d</firmware_commit>
+        </esc>
+        <esc id="14">
+            <bus>1</bus>
+            <board_name>aero.currawong.esc.hs</board_name>
+            <firmware_commit>cf5907d</firmware_commit>
+        </esc>
+        <esc id="25">
+            <bus>2</bus>
+            <board_name>aero.currawong.esc.hs</board_name>
+            <firmware_commit>cf5907d</firmware_commit>
+        </esc>
+        <esc id="26">
+            <bus>2</bus>
+            <board_name>aero.currawong.esc.hs</board_name>
+            <firmware_commit>cf5907d</firmware_commit>
+        </esc>
+        <esc id="27">
+            <bus>2</bus>
+            <board_name>aero.currawong.esc.hs</board_name>
+            <firmware_commit>cf5907d</firmware_commit>
+        </esc>
+        <esc id="28">
+            <bus>2</bus>
+            <board_name>aero.currawong.esc.hs</board_name>
+            <firmware_commit>cf5907d</firmware_commit>
+        </esc>
     </esc_list>
     <airspeed_list>
+        <airspeed id="36">
+            <bus>1</bus>
+            <board_name>org.ardupilot.MatekL431-Airspeed</board_name>
+            <firmware_commit>9c6f307f</firmware_commit>
+        </airspeed>
+        <airspeed id="46">
+            <bus>2</bus>
+            <board_name>org.ardupilot.MatekL431-Airspeed</board_name>
+            <firmware_commit>9c6f307f</firmware_commit>
+        </airspeed>
     </airspeed_list>
     <battery_list>
+        <battery id="38">
+            <bus>1</bus>
+            <board_name>org.ardupilot.MatekL431-BattMon</board_name>
+            <firmware_commit>9c6f307f</firmware_commit>
+        </battery>
     </battery_list>
     <barometer_list>
     </barometer_list>
     <lidar_list>
     </lidar_list>
+    <servo_list>
+        <servo id="41">
+            <bus>2</bus>
+            <board_name>MKS-HBL6625:006</board_name>
+            <firmware_commit>20260821</firmware_commit>
+        </servo>
+        <servo id="42">
+            <bus>2</bus>
+            <board_name>MKS-HBL6625:011</board_name>
+            <firmware_commit>20260821</firmware_commit>
+        </servo>
+        <servo id="43">
+            <bus>2</bus>
+            <board_name>MKS-HBL3850:010</board_name>
+            <firmware_commit>20260729</firmware_commit>
+        </servo>
+        <servo id="31">
+            <bus>1</bus>
+            <board_name>MKS-HBL6625:012</board_name>
+            <firmware_commit>20260821</firmware_commit>
+        </servo>
+        <servo id="32">
+            <bus>1</bus>
+            <board_name>MKS-HBL6625:015</board_name>
+            <firmware_commit>20260821</firmware_commit>
+        </servo>
+        <servo id="33">
+            <bus>1</bus>
+            <board_name>MKS-HBL3850:013</board_name>
+            <firmware_commit>20260729</firmware_commit>
+        </servo>
+    </servo_list>
+    <gps_list>
+        <gps id="34">
+            <bus>1</bus>
+            <board_name>org.ardupilot.HolybroG4_GPS</board_name>
+            <firmware_commit>6e519848</firmware_commit>
+        </gps>
+        <gps id="44">
+            <bus>2</bus>
+            <board_name>org.ardupilot.HolybroG4_GPS</board_name>
+            <firmware_commit>6e519848</firmware_commit>
+        </gps>
+    </gps_list>
     <lua_script_list>
         <lua_script>
             <source_path>scripts/cx_built_in_test.lua</source_path>
