@@ -1,0 +1,12 @@
+# Bench-test params for CarbonixL431 CPC TMP1075 DroneCAN temperature testing.
+# Not referenced by any aircraft config - apply manually via GCS "Load from file"
+# on the bench FC. TEMPn_MSG_ID must match the CPC's TEMPn_SRC_ID (currently 1-4).
+TEMP1_TYPE,6
+TEMP1_MSG_ID,1
+TEMP2_TYPE,6
+TEMP2_MSG_ID,2
+TEMP3_TYPE,6
+TEMP3_MSG_ID,3
+TEMP4_TYPE,6
+TEMP4_MSG_ID,4
+TEMP_LOG,1
