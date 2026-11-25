@@ -1,6 +1,7 @@
 @include ./Common.parm
 @include ./OttanoCommon.parm
 # Ottano Quad-specific parameters
+ADSB_TYPE,1
 AIRSPEED_CRUISE,26
 AIRSPEED_MAX,36
 AIRSPEED_MIN,23

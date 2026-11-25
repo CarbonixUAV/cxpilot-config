@@ -1,6 +1,10 @@
 @include ./Common.parm
 @include ./OttanoCommon.parm
 # Ottano Octo-specific parameters
+ADSB_ICAO_ID,-1 # Transponder is preconfigured
+ADSB_OPTIONS,4 # Squawk 7400 on GCS failsafe
+ADSB_RF_SELECT,3 # bug: Tx bit needed for MAV_CMD_DO_ADSB_OUT_IDENT to be accepted
+ADSB_TYPE,3 # uAvionix UCP: Ping200X
 AIRSPEED_CRUISE,27
 AIRSPEED_MAX,33
 AIRSPEED_MIN,25
@@ -8,6 +12,11 @@ BATT4_ESC_MASK,150 # Left ESCs:2,3,5,8
 BATT5_ESC_MASK,105 # Right ESCs:1,4,6,7
 CAN_D1_UC_ESC_BM,16711680
 CAN_D1_UC_ESC_OF,16
+CAN_D1_UC_S1_BD,57600 # Ping200X UCP baud DISABLE_CHECKS: meta suggests the abbreviated "57" form, but this takes full baud values
+CAN_D1_UC_S1_IDX,3 # Serial 3 on the CPN (UART4, PA0/PA1)
+CAN_D1_UC_S1_NOD,35 # Node ID for Ottano-Fuse1
+CAN_D1_UC_S1_PRO,35 # ADSB (no relation to the CPN node ID)
+CAN_D1_UC_SER_EN,1
 CAN_D2_UC_ESC_BM,16711680
 CAN_D2_UC_ESC_OF,16
 COMPASS_PRIO1_ID,74243 # DroneCAN0, address 34, devtype 1
