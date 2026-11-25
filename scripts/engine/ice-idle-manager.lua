@@ -97,7 +97,7 @@ local IDL_WRM_RPM  = bind_add_param('WRM_RPM', 4, 3200)
   // @Range: 2400 4000
   // @Units: RPM
 --]]
-local IDL_FLT_RPM  = bind_add_param('FLT_RPM', 5, 3400)
+local IDL_FLT_RPM  = bind_add_param('FLT_RPM', 5, 4000)
 
 --[[
   // @Param: IDL_LOW_RPM
