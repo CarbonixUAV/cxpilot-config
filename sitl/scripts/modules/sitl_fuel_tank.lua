@@ -1,12 +1,13 @@
 --[[
 Fuel tank and fuel-level sensor model for sitl_engine.lua (Ottano).
 
-The tank drains at the engine's true burn rate, looked up by RPM. The level
-sensor reads the fuel's height at its probe, so it follows the tank's tilt as
-well as the fuel on board. What tilts the fuel is the specific force, as the
-IMU measures it, so the sensor responds to acceleration as it does to
-attitude: nose-up, or speeding up, reads high. The fuel takes a while to
-settle, and it overshoots a little.
+The tank drains at the engine's true burn rate, looked up by RPM, and through
+any leak, which the ECU doesn't meter. The level sensor reads the fuel's
+height at its probe, so it follows the tank's tilt as well as the fuel on
+board. What tilts the fuel is the specific force, as the IMU measures it, so
+the sensor responds to acceleration as it does to attitude: nose-up, or
+speeding up, reads high. The fuel takes a while to settle, and it overshoots
+a little.
 
 The sensor then reads, on Fuse1, the kg it was calibrated to:
 
@@ -113,10 +114,19 @@ function fuel_tank.new(mass_kg)
     local slosh = nil
     local elapsed = 0
     local reading = nil -- the CPN's filtered reading
+    local leak_kgph = 0
 
     ---@param kg number
     function self.set_mass(kg)
         mass = math.max(kg, 0)
+    end
+
+    ---Leak the fuel on board away over this many minutes, at a steady rate.
+    ---The burn comes on top, so the tank runs dry a little sooner. 0 or less
+    ---stops the leak.
+    ---@param minutes number
+    function self.set_leak(minutes)
+        leak_kgph = minutes > 0 and mass * 60 / minutes or 0
     end
 
     ---@return number -- kg on board
@@ -129,12 +139,12 @@ function fuel_tank.new(mass_kg)
         return mass <= UNUSABLE_KG
     end
 
-    ---Burn fuel and move the fuel in the tank.
+    ---Burn and leak fuel, and move the fuel in the tank.
     ---@param dt number -- s
     ---@param burn_kgph number -- true burn rate
     ---@param accel Vector3f_ud -- body-frame specific force (the IMU's)
     function self.step(dt, burn_kgph, accel)
-        mass = math.max(mass - burn_kgph * dt / 3600, 0)
+        mass = math.max(mass - (burn_kgph + leak_kgph) * dt / 3600, 0)
 
         -- Hold the fuel where it is through anything short of half a g down
         local down = -accel:z()

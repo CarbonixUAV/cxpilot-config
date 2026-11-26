@@ -34,7 +34,8 @@ reports the burn high, by SIM_ICE_EFI_FLOW, as the aircraft's ECU did. With
 the tank dry the pump draws air: the pressure falls first, and the engine
 quits under a second later, as it has in flight. SIM_ICE_FUEL_KG is the fuel
 on board at boot; changing it refuels or drains the tank at once, and the pump
-primes again.
+primes again. SIM_ICE_LEAK leaks the tank dry over a set time, unmetered, so
+the EFI's fuel used carries on as if nothing were wrong.
 --]]
 
 local fuel_tank = require('sitl_fuel_tank')
@@ -59,7 +60,7 @@ end
 -- Set up EFI parameters
 PARAM_TABLE_PREFIX = 'SIM_ICE_'
 PARAM_TABLE_KEY = 36
-assert(param:add_table(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, 16), 'could not add ' .. string.sub(PARAM_TABLE_PREFIX, 1, -2) .. ' param table')
+assert(param:add_table(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, 17), 'could not add ' .. string.sub(PARAM_TABLE_PREFIX, 1, -2) .. ' param table')
 --[[
   // @Param: SIM_ICE_CHT1_INC
   // @DisplayName: CHT1 Increase
@@ -187,6 +188,14 @@ local FL_MUL = bind_add_param('FL_MUL', 15, 1.04)
   // @Units: kg
 --]]
 local FL_OFS = bind_add_param('FL_OFS', 16, 0.32)
+--[[
+  // @Param: SIM_ICE_LEAK
+  // @DisplayName: Fuel leak
+  // @Description: Writing a time starts a leak that drains the fuel then on board over that many minutes. The burn comes on top, so the tank runs dry a little sooner. The EFI doesn't meter the leak, so only the level sensor (BATT3) shows it. Writing again restarts it from the fuel then on board; 0 stops it. A leak left set starts again at boot, from the load at boot.
+  // @Range: 0 600
+  // @Units: min
+--]]
+local LEAK = bind_add_param('LEAK', 17, 0)
 
 -- We look at RPM2 to see if another source (RealFlight) should provide the RPM
 -- instead of us making one up based on the throttle PWM.
@@ -561,6 +570,12 @@ local function engine_control()
         end
     end
 
+    ---Leak the fuel on board away over this many minutes (0 stops it).
+    ---@param minutes number
+    function self.set_leak(minutes)
+        tank.set_leak(minutes)
+    end
+
     ---@return boolean -- the line has the pressure the engine needs to run
     function self.fueled()
         return fuel_pressure > FP_NOM:get() - FUEL_PRESSURE.STARVED_BELOW_NOM
@@ -689,6 +704,7 @@ end
 
 local engine = engine_control()
 local last_fuel_kg = FUEL_KG:get()
+local last_leak_min = nil -- so a leak left set starts at boot
 local last_update_ms = nil
 
 local function update()
@@ -714,6 +730,11 @@ local function update()
     if fuel_kg ~= last_fuel_kg then
         engine.set_fuel(fuel_kg)
         last_fuel_kg = fuel_kg
+    end
+    local leak_min = LEAK:get()
+    if leak_min ~= last_leak_min then
+        engine.set_leak(leak_min)
+        last_leak_min = leak_min
     end
 
     local ecu_on = discon & DISCON_MAIN == 0 and ECU_FAIL:get() == 0
