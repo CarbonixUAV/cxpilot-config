@@ -338,7 +338,7 @@ local function update()
         end
     end
 
-    escs.send_telem(function(i) return pack_of[i].voltage end)
+    escs.send_telem(function(i) return pack_of[i].voltage end, dt)
     check_physics_battery(now_ms)
 end
 

@@ -324,8 +324,9 @@ local efi_backend = nil
 ---@param airspeed number Airspeed in m/s
 ---@param tconst_cruise number Time constant for thermal inertia at cruise speed (s)
 ---@param kappa number Scaling factor for thermal inertia changes with airspeed
+---@param dt number Seconds since the last update
 ---@return number
-local function update_cht(current_cht, cht_steady, airspeed, tconst_cruise, kappa)
+local function update_cht(current_cht, cht_steady, airspeed, tconst_cruise, kappa, dt)
     --[[
     We model the thermal inertia of the engine as a first-order system:
     
@@ -345,7 +346,7 @@ local function update_cht(current_cht, cht_steady, airspeed, tconst_cruise, kapp
     --]]
 
     local tau = tconst_cruise * (1 + kappa * math.sqrt(NOMINAL_VALUES.CRUISE_SPEED)) / (1 + kappa * math.sqrt(airspeed))
-    local decay_factor = 1 - math.exp(-1 / tau / UPDATE_HZ)
+    local decay_factor = 1 - math.exp(-dt / tau)
     return current_cht * (1 - decay_factor) + cht_steady * decay_factor
 end
 
@@ -538,7 +539,7 @@ local function engine_control()
             local cht_steady = self.calculate_cht_steady(airspeed, params, cht_increase)
 
             -- Update CHT towards steady state
-            temps.cht[i] = update_cht(temps.cht[i], cht_steady, airspeed, params.TCONST_CRUISE, params.KAPPA)
+            temps.cht[i] = update_cht(temps.cht[i], cht_steady, airspeed, params.TCONST_CRUISE, params.KAPPA, dt)
         end
 
         -- Simulate EGT1 and EGT2
@@ -550,7 +551,7 @@ local function engine_control()
             local egt_steady = self.calculate_cht_steady(airspeed, params, egt_increase)
 
             -- Update EGT towards steady state
-            temps.egt[i] = update_cht(temps.egt[i], egt_steady, airspeed, params.TCONST_CRUISE, params.KAPPA)
+            temps.egt[i] = update_cht(temps.egt[i], egt_steady, airspeed, params.TCONST_CRUISE, params.KAPPA, dt)
         end
 
         -- Simulate fuel consumption, and the EFI's report of it

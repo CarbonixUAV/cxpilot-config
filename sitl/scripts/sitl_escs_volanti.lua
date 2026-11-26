@@ -31,12 +31,17 @@ local C = {
 local BAT_IDX = 8
 
 local escs = esc_sim.new(C)
+local last_ms = nil
 
 local function update()
+    local now_ms = millis()
+    local dt = last_ms and (now_ms - last_ms):tofloat() * 0.001 or 0
+    last_ms = now_ms
+
     local voltage = battery:voltage(BAT_IDX) or 0
     escs.update_thrust()
     escs.split_current(battery:current_amps(BAT_IDX) or 0)
-    escs.send_telem(function() return voltage end)
+    escs.send_telem(function() return voltage end, dt)
 end
 
 -- Wrapper to handle errors

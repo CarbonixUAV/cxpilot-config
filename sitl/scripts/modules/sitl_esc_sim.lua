@@ -34,7 +34,7 @@ end
 esc_sim.gaussian_noise = gaussian_noise
 
 ---Set up the ESC simulation. Call once.
----@param c table -- the aircraft's constants: UPDATE_HZ, CABLE_RESISTANCE (ohms), CURRENT_NOISE (A), VOLTAGE_NOISE (V), RPM_NOISE (% of RPM), NOMINAL_CURRENT (A), DELTA_TEMP (degC at NOMINAL_CURRENT), TIME_CONSTANT (s), MIN_RPM
+---@param c table -- the aircraft's constants: CABLE_RESISTANCE (ohms), CURRENT_NOISE (A), VOLTAGE_NOISE (V), RPM_NOISE (% of RPM), NOMINAL_CURRENT (A), DELTA_TEMP (degC at NOMINAL_CURRENT), TIME_CONSTANT (s), MIN_RPM
 ---@return table
 function esc_sim.new(c)
     local self = {}
@@ -99,8 +99,8 @@ function esc_sim.new(c)
         return start_temp - altitude * 0.0065
     end
 
-    local function move_temp_toward_steady(temp, temp_steady)
-        local decay_factor = 1 - math.exp(-1 / c.TIME_CONSTANT / c.UPDATE_HZ)
+    local function move_temp_toward_steady(temp, temp_steady, dt)
+        local decay_factor = 1 - math.exp(-dt / c.TIME_CONSTANT)
         return temp * (1 - decay_factor) + temp_steady * decay_factor
     end
 
@@ -218,14 +218,15 @@ function esc_sim.new(c)
     ---Set each ESC's voltage and temperature and send the telemetry. Call after
     ---the currents are set.
     ---@param supply_voltage function -- (i, esc) -> the voltage at ESC i's end of the pack leads, before its own cable drop
-    function self.send_telem(supply_voltage)
+    ---@param dt number -- s since the last call
+    function self.send_telem(supply_voltage, dt)
         for i, esc in ipairs(self.escs) do
             local esc_voltage = supply_voltage(i, esc) - esc.current * c.CABLE_RESISTANCE + gaussian_noise(c.VOLTAGE_NOISE)
             local steady_temp = get_air_temperature() + (esc.current^2) / (c.NOMINAL_CURRENT^2) * c.DELTA_TEMP
             if OVERHEAT_MASK:get() & (1 << (i - 1)) ~= 0 then
                 steady_temp = steady_temp + OVERHEAT_TEMP:get()
             end
-            esc.temp = move_temp_toward_steady(esc.temp, steady_temp)
+            esc.temp = move_temp_toward_steady(esc.temp, steady_temp, dt)
 
             -- Set the telemetry data
             esc.telem_data:voltage(esc_voltage)
