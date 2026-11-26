@@ -68,6 +68,7 @@ function pack.new(spec)
     local hold = false
     local vp = {}   -- voltage across each RC pair
     local r_mult = 1.0
+    local drain_mult = 1.0
 
     ---Put the pack back to full, rested.
     function self.reset()
@@ -100,6 +101,14 @@ function pack.new(spec)
     ---@param mult number
     function self.set_resistance_mult(mult)
         r_mult = math.max(mult, 0.01)
+    end
+
+    ---Multiply how fast the charge runs down by this, so 2 drains it twice as
+    ---fast. The state of charge carries over, so the voltage doesn't step.
+    ---Below 0 is taken as 0.
+    ---@param mult number
+    function self.set_drain_mult(mult)
+        drain_mult = math.max(mult, 0)
     end
 
     ---@return number -- series resistance R0, with the multiplier applied
@@ -152,7 +161,7 @@ function pack.new(spec)
             vp[k] = vp[k] * a + current * rc.r * r_mult * (1 - a)
         end
         if not hold then
-            soc = math.max(soc - current * dt / 3600 / spec.capacity_ah, min_soc(spec.ocv))
+            soc = math.max(soc - current * drain_mult * dt / 3600 / spec.capacity_ah, min_soc(spec.ocv))
         end
     end
 

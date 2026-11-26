@@ -24,7 +24,7 @@ power, so without that its electric pusher drains the battery the VTOL motors
 fly on.
 
 Injects: SIM_ESC_* (telemetry failure, overheat), SIM_VTB_* (set a pack's
-charge, resistance multiplier), and these owned by sitl_power.lua:
+charge, resistance and drain rate multipliers), and these owned by sitl_power.lua:
 SIM_PWR_RESET puts both packs back to full on any change, SIM_PWR_HOLD holds a
 pack's charge, and SIM_PWR_DISCON disconnects a pack (its ESCs go quiet and
 its motors get nothing).
@@ -54,7 +54,7 @@ local function bind_add_param(name, idx, default_value)
     return bind_param(PARAM_TABLE_PREFIX .. name)
 end
 
-assert(param:add_table(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, 4), 'could not add ' .. string.sub(PARAM_TABLE_PREFIX, 1, -2) .. ' param table')
+assert(param:add_table(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, 6), 'could not add ' .. string.sub(PARAM_TABLE_PREFIX, 1, -2) .. ' param table')
 --[[
   // @Param: SIM_VTB_SOC_L
   // @DisplayName: Set left VTOL pack charge
@@ -85,6 +85,20 @@ local RX_L = bind_add_param('RX_L', 3, 1.0)
   // @Range: 0 10
 --]]
 local RX_R = bind_add_param('RX_R', 4, 1.0)
+--[[
+  // @Param: SIM_VTB_DR_L
+  // @DisplayName: Left VTOL pack drain rate multiplier
+  // @Description: Multiplies how fast the left VTOL pack runs down, so 2 drains it twice as fast. Its charge carries over when this changes. BATT4_CAPACITY stays as it is, so the autopilot's remaining percentage reads high, as with an aged pack.
+  // @Range: 0.1 100
+--]]
+local DR_L = bind_add_param('DR_L', 5, 1.0)
+--[[
+  // @Param: SIM_VTB_DR_R
+  // @DisplayName: Right VTOL pack drain rate multiplier
+  // @Description: Multiplies how fast the right VTOL pack runs down, so 2 drains it twice as fast. Its charge carries over when this changes. BATT5_CAPACITY stays as it is, so the autopilot's remaining percentage reads high, as with an aged pack.
+  // @Range: 0.1 100
+--]]
+local DR_R = bind_add_param('DR_R', 6, 1.0)
 
 -- Constants for Ottano
 -- (these could be parameters, but they don't need to change in flight, and the
@@ -147,8 +161,8 @@ local escs = esc_sim.new(C)
 
 local packs = {
     -- bit: the pack's bit in SIM_PWR_HOLD and SIM_PWR_DISCON
-    {name = 'left', bit = 1, mask = param:get('BATT4_ESC_MASK'), soc = SOC_L, rx = RX_L, model = pack.new(VTOL_PACK), voltage = 0, connected = true},
-    {name = 'right', bit = 2, mask = param:get('BATT5_ESC_MASK'), soc = SOC_R, rx = RX_R, model = pack.new(VTOL_PACK), voltage = 0, connected = true},
+    {name = 'left', bit = 1, mask = param:get('BATT4_ESC_MASK'), soc = SOC_L, rx = RX_L, dr = DR_L, model = pack.new(VTOL_PACK), voltage = 0, connected = true},
+    {name = 'right', bit = 2, mask = param:get('BATT5_ESC_MASK'), soc = SOC_R, rx = RX_R, dr = DR_R, model = pack.new(VTOL_PACK), voltage = 0, connected = true},
 }
 -- pack_of[i]: the pack that ESC telemetry index i (1-based) draws from
 local pack_of = {}
@@ -219,6 +233,7 @@ local function handle_injects()
             gcs:send_text(6, string.format('SITL: %s VTOL pack set to %.0f%%', p.name, p.model.soc_pct()))
         end
         p.model.set_resistance_mult(p.rx:get())
+        p.model.set_drain_mult(p.dr:get())
         p.model.set_hold(hold & p.bit ~= 0)
         local connected = discon & p.bit == 0
         if connected ~= p.connected then

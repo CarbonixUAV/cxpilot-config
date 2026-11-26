@@ -56,7 +56,7 @@ local function bind_add_param(name, idx, default_value)
     return bind_param(PARAM_TABLE_PREFIX .. name)
 end
 
-assert(param:add_table(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, 14), 'could not add ' .. string.sub(PARAM_TABLE_PREFIX, 1, -2) .. ' param table')
+assert(param:add_table(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, 16), 'could not add ' .. string.sub(PARAM_TABLE_PREFIX, 1, -2) .. ' param table')
 --[[
   // @Param: SIM_PWR_BRD_W
   // @DisplayName: Board load
@@ -157,6 +157,20 @@ local HOLD = bind_add_param('HOLD', 13, 0)
   // @Bitmask: 0:Left VTOL pack, 1:Right VTOL pack, 2:AVBAT, 3:Backup battery, 4:Main switch off
 --]]
 local DISCON = bind_add_param('DISCON', 14, 0)
+--[[
+  // @Param: SIM_PWR_AVB_DR
+  // @DisplayName: AVBAT drain rate multiplier
+  // @Description: Multiplies how fast AVBAT runs down, so 2 drains it twice as fast. Its charge carries over when this changes.
+  // @Range: 0.1 100
+--]]
+local AVB_DR = bind_add_param('AVB_DR', 15, 1.0)
+--[[
+  // @Param: SIM_PWR_BKP_DR
+  // @DisplayName: Backup battery drain rate multiplier
+  // @Description: Multiplies how fast the backup battery runs down, so 2 drains it twice as fast. Its charge carries over when this changes.
+  // @Range: 0.1 100
+--]]
+local BKP_DR = bind_add_param('BKP_DR', 16, 1.0)
 
 local FAIL_PMU = 1
 local FAIL_GENERATOR = 2
@@ -294,6 +308,8 @@ local function handle_injects()
     end
     avbat.set_resistance_mult(AVB_RX:get())
     backup.set_resistance_mult(BKP_RX:get())
+    avbat.set_drain_mult(AVB_DR:get())
+    backup.set_drain_mult(BKP_DR:get())
     local hold = math.floor(HOLD:get())
     avbat.set_hold(hold & HOLD_AVBAT ~= 0)
     backup.set_hold(hold & HOLD_BACKUP ~= 0)
