@@ -1349,7 +1349,8 @@ class AutoTestCarbonix(AutoTestQuadPlane):
         '''Test the simulated fuel tank and level sensor (BATT3, kg in the voltage field).
 
         The level reads through O16's calibration and sloshes with the specific
-        force; a dry tank starves the engine.
+        force; a dry tank starves the engine; a leak drains the tank in its
+        time, and the EFI doesn't count it.
         '''
         if not self.has_parameter('SIM_ICE_FUEL_KG'):
             self.progress('No simulated fuel tank on this frame; skipping')
@@ -1437,6 +1438,26 @@ class AutoTestCarbonix(AutoTestQuadPlane):
         self.start_engine()
         self.wait_battery_voltage(8, nominal - 3, nominal + 2, timeout=15)
         self.wait_battery_voltage(3, 9.35, 9.65, timeout=5)
+
+        self.start_subtest("A leak drains the tank in its time, and the EFI doesn't count it")
+        # 9.5 kg over 2 minutes is 4.75 kg a minute; the idle burn adds a few grams
+        used_before = self.assert_receive_message('EFI_STATUS', timeout=2).fuel_consumed
+        self.set_parameter('SIM_ICE_LEAK', 2)
+        tstart = self.get_sim_time()
+        self.delay_sim_time(60)
+        level = self.battery_voltage(3)
+        used = self.assert_receive_message('EFI_STATUS', timeout=2).fuel_consumed - used_before
+        self.progress(f'After a minute of the leak: the sensor reads {level:.2f} kg, '
+                      f'and the EFI has used {used:.0f} g')
+        if abs(level - 4.75) > 0.25:
+            raise NotAchievedException('The tank did not drain at the leak rate')
+        if used > 50:
+            raise NotAchievedException('The EFI counted the leak')
+        self.wait_rpm(1, 0, 1000, timeout=90)
+        quit_after = self.get_sim_time() - tstart
+        self.progress(f'The engine quit {quit_after:.1f} s after the leak started')
+        if not 110 < quit_after < 125:
+            raise NotAchievedException('The leak did not run the tank dry in its time')
 
     def _pretest_hook(self):
         self.install_terrain_handlers_context()
