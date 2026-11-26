@@ -929,8 +929,9 @@ class AutoTestCarbonix(AutoTestQuadPlane):
 
         The PMU boosts from AVBAT below the generator's cut-in RPM and
         generates above it; cranking sags AVBAT; the injects fail the PMU or
-        the generator, set and hold AVBAT's charge, and disconnect the
-        sources and the main switch, down to a cold boot on AVBAT alone.
+        the generator, set and hold AVBAT's charge, drain it faster, and
+        disconnect the sources and the main switch, down to a cold boot on
+        AVBAT alone.
         '''
         if not self.has_parameter('SIM_PWR_CUTIN'):
             self.progress('No simulated avionics power on this frame; skipping')
@@ -1051,6 +1052,22 @@ class AutoTestCarbonix(AutoTestQuadPlane):
         if abs(v_end - v_start) > 0.03:
             raise NotAchievedException('AVBAT drained while held')
         self.set_parameter('SIM_PWR_HOLD', 0)
+
+        self.start_subtest('AVBAT drains faster, from the charge it had')
+        v_before = self.battery_voltage(2)
+        # 50 times: the boost's 6.5 A takes about 1% a second
+        self.set_parameter('SIM_PWR_AVB_DR', 50)
+        v_start = self.battery_voltage(2)
+        self.delay_sim_time(20)
+        v_end = self.battery_voltage(2)
+        self.progress(f'AVBAT draining 50 times faster: {v_before:.3f} V before, {v_start:.3f} V to '
+                      f'{v_end:.3f} V over 20 s boosting')
+        if abs(v_start - v_before) > 0.15:
+            raise NotAchievedException('AVBAT stepped when its drain rate changed')
+        if v_start - v_end < 0.3:
+            raise NotAchievedException('AVBAT did not drain faster')
+        self.set_parameter('SIM_PWR_AVB_DR', 1)
+        self.reset_sim_packs()
 
         self.start_subtest("Main switch off: the board runs on AVBAT, and the engine can't run")
         self.set_parameter('SIM_PWR_DISCON', 16)
