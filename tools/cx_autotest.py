@@ -7,6 +7,7 @@ import sys
 import shutil
 import argparse
 import functools
+import statistics
 from typing import Any, Callable, Optional, Union
 from pathlib import Path
 from pymavlink import mavparm, mavutil
@@ -183,6 +184,107 @@ class AutoTestCarbonix(AutoTestQuadPlane):
 
     def wait_not_ready_to_arm(self, timeout=5):
         self.wait_sensor_state(mavutil.mavlink.MAV_SYS_STATUS_PREARM_CHECK, True, True, False, timeout=timeout)
+
+    def has_parameter(self, name):
+        '''Return whether the vehicle has a parameter, such as one a SITL script adds.'''
+        try:
+            self.get_parameter(name, attempts=2, timeout=2, verbose=False)
+        except NotAchievedException:
+            return False
+        return True
+
+    @staticmethod
+    def battery_status_voltage(m):
+        '''Return the pack voltage a BATTERY_STATUS reports.
+
+        ArduPilot spreads a voltage it has no cells for across the cell
+        fields, 65.534 V at most each.
+        '''
+        cells = [v for v in m.voltages if v != 65535]
+        cells += [v for v in (getattr(m, 'voltages_ext', None) or []) if v not in (0, 65535)]
+        return sum(cells) * 0.001
+
+    @staticmethod
+    def robust_spread(values):
+        '''Return a standard deviation that a few outliers can't inflate.
+
+        It is the median absolute deviation, scaled to the standard deviation
+        of normally distributed values.
+        '''
+        med = statistics.median(values)
+        return 1.4826 * statistics.median(abs(v - med) for v in values)
+
+    def battery_samples(self, batt, duration):
+        '''Collect the voltages and currents BATTn reports over a period.
+
+        Args:
+            batt (int): Monitor number as in the parameter names (BATT2 is 2).
+            duration (float): Sim seconds to collect for.
+
+        Returns:
+            tuple[list[float], list[float]]: Voltages (V) and currents (A).
+        '''
+        volts, amps = [], []
+        tstart = self.get_sim_time()
+        while self.get_sim_time_cached() - tstart < duration:
+            m = self.mav.recv_match(type='BATTERY_STATUS', blocking=True, timeout=1)
+            if m is None or m.id != batt - 1:
+                continue
+            volts.append(self.battery_status_voltage(m))
+            amps.append(m.current_battery * 0.01)
+        if len(volts) < 2:
+            raise NotAchievedException(f'Too few BATTERY_STATUS messages for BATT{batt}')
+        return volts, amps
+
+    def battery_voltage(self, batt, duration=2):
+        '''Return the mean voltage BATTn reports over a period.'''
+        return statistics.mean(self.battery_samples(batt, duration)[0])
+
+    def wait_battery_voltage(self, batt, v_min, v_max, timeout=30):
+        '''Wait for BATTn's mean voltage over 1 s to come within a range.'''
+        tstart = self.get_sim_time()
+        while True:
+            v = self.battery_voltage(batt, duration=1)
+            self.progress(f'BATT{batt}: {v:.2f} V (want {v_min:.2f} to {v_max:.2f})')
+            if v_min <= v <= v_max:
+                return v
+            if self.get_sim_time_cached() - tstart > timeout:
+                raise NotAchievedException(f'BATT{batt} at {v:.2f} V, want {v_min:.2f} to {v_max:.2f}')
+
+    def esc_pack_voltage(self, mask, duration=2):
+        '''Return the mean voltage the ESCs in a mask report over a period.
+
+        The ESC voltages are raw, unlike a monitor's with the
+        resistance-compensated voltage option.
+        '''
+        volts = []
+        tstart = self.get_sim_time()
+        while self.get_sim_time_cached() - tstart < duration:
+            m = self.mav.recv_match(type=['ESC_TELEMETRY_1_TO_4', 'ESC_TELEMETRY_5_TO_8'], blocking=True, timeout=1)
+            if m is None:
+                continue
+            first = 0 if m.get_type() == 'ESC_TELEMETRY_1_TO_4' else 4
+            volts += [m.voltage[k] * 0.01 for k in range(4) if int(mask) & (1 << (first + k))]
+        if not volts:
+            raise NotAchievedException(f'No ESC telemetry for mask {mask}')
+        return statistics.mean(volts)
+
+    def set_sim_charge(self, param_name, pct):
+        '''Set a simulated pack's charge through its SIM_*_SOC parameter.
+
+        Checks the parameter reads back -1 once applied; the caller confirms
+        the charge took by the voltage.
+        '''
+        # Not set_parameter: the script writes -1 back at once, so it can't
+        # confirm the write
+        self.send_set_parameter_direct(param_name, pct)
+        self.delay_sim_time(1)
+        self.assert_parameter_value(param_name, -1)
+
+    def reset_sim_packs(self):
+        '''Put every simulated pack back to its starting charge by changing SIM_PWR_RESET.'''
+        self.set_parameter('SIM_PWR_RESET', self.get_parameter('SIM_PWR_RESET') + 1, add_to_context=False)
+        self.delay_sim_time(1)
 
     def wait_for_engine_temp(self, idx=1, is_cht=True, temp_min=-280, temp_max=6000, timeout=10):
         """
@@ -822,6 +924,541 @@ class AutoTestCarbonix(AutoTestQuadPlane):
             raise NotAchievedException(
                 f"ENG_HOURS was {stopped:.4f} before reboot, {rebooted:.4f} after")
 
+    def AvionicsPower(self):
+        '''Test the simulated avionics power: AVBAT (BATT2) and the bus (BATT6, BATT7).
+
+        The PMU boosts from AVBAT below the generator's cut-in RPM and
+        generates above it; cranking sags AVBAT; the injects fail the PMU or
+        the generator, set and hold AVBAT's charge, drain it faster, and
+        disconnect the sources and the main switch, down to a cold boot on
+        AVBAT alone.
+        '''
+        if not self.has_parameter('SIM_PWR_CUTIN'):
+            self.progress('No simulated avionics power on this frame; skipping')
+            return
+
+        # Start from a stopped engine, full packs and no latched failsafes
+        self.reboot_sitl()
+        # Fast enough to see every 10 Hz update of each monitor: the crank's
+        # bus dip lasts about 0.3 s
+        self.context_set_message_rate_hz(mavutil.mavlink.MAVLINK_MSG_ID_BATTERY_STATUS, 100)
+        cutin = self.get_parameter('SIM_PWR_CUTIN')
+        cut_hys = self.get_parameter('SIM_PWR_CUT_HYS')
+
+        self.start_subtest('Engine stopped: the PMU boosts from AVBAT')
+        bus, bkp_amps = self.battery_samples(6, 5)
+        _, pri_amps = self.battery_samples(7, 5)
+        avbat, avbat_amps = self.battery_samples(2, 3)
+        self.progress(f'bus {statistics.mean(bus):.2f} V (std {statistics.stdev(bus):.3f}), '
+                      f'BATT6 {statistics.mean(bkp_amps):.2f} A, BATT7 {statistics.mean(pri_amps):.2f} A, '
+                      f'AVBAT {statistics.mean(avbat):.2f} V {statistics.mean(avbat_amps):.3f} A')
+        if not 27.0 < statistics.mean(bus) < 27.7 or statistics.stdev(bus) > 0.12:
+            raise NotAchievedException('Bus not at the smooth boosting level')
+        if not 2.5 < statistics.mean(pri_amps) < 4.0:
+            raise NotAchievedException('BATT7 does not carry the board load')
+        if not 0 < statistics.mean(bkp_amps) < 0.3:
+            raise NotAchievedException('BATT6 shows the backup conducting')
+        if not 23.8 < statistics.mean(avbat) < 25.1:
+            raise NotAchievedException('AVBAT not at a full pack under the boost load')
+        if abs(statistics.mean(avbat_amps)) > 0.05:
+            raise NotAchievedException('BATT2 current should read about zero')
+
+        self.start_subtest('Setting and resetting AVBAT charge')
+        self.set_sim_charge('SIM_PWR_AVB_SOC', 40)
+        self.wait_battery_voltage(2, 21.0, 22.8, timeout=5)
+        self.reset_sim_packs()
+        self.wait_battery_voltage(2, 23.8, 25.1, timeout=5)
+
+        self.start_subtest('Cranking sags AVBAT and drops the PMU out, and nothing generates')
+        self.context_collect('BATTERY_STATUS')
+        self.start_engine()
+        self.delay_sim_time(8)
+        msgs = self.context_collection('BATTERY_STATUS')
+        self.context_stop_collecting('BATTERY_STATUS')
+        avbat = [self.battery_status_voltage(m) for m in msgs if m.id == 1]
+        bus = [self.battery_status_voltage(m) for m in msgs if m.id == 5]
+        bkp_amps = [m.current_battery * 0.01 for m in msgs if m.id == 5]
+        self.progress(f'AVBAT low {min(avbat):.2f} V, now {avbat[-1]:.2f} V; bus low {min(bus):.2f} V, '
+                      f'now {bus[-1]:.2f} V; backup peak {max(bkp_amps):.2f} A')
+        if min(avbat) > 19.5 or avbat[-1] < 23.5:
+            raise NotAchievedException('AVBAT did not sag while cranking and recover')
+        if min(bus) > 26.5 or bus[-1] < 27.0:
+            raise NotAchievedException('The bus did not dip while cranking and recover')
+        if max(bkp_amps) < 1.0:
+            raise NotAchievedException('The backup did not hold the bus while cranking')
+        # The starter stays on for ICE_STARTER_TIME, and in SITL the engine
+        # runs above the cut-in RPM meanwhile; the PMU must not generate. The
+        # dip's recovery (or a second crank's) would inflate a plain standard
+        # deviation, so take a robust one: boosting reads about 0.06 V,
+        # generating at least 0.15 V
+        steady = [v for v in bus if v > 26.5]
+        spread = self.robust_spread(steady)
+        self.progress(f'bus spread outside the dip {spread:.3f}')
+        if spread > 0.12:
+            raise NotAchievedException('Generating ripple on the bus while the starter ran')
+
+        self.start_subtest('The generator cuts in above the cut-in RPM')
+        self.wait_rpm(1, 1000, cutin - cut_hys - 50, timeout=20)
+        self.delay_sim_time(40)  # let AVBAT's polarization settle under the boost
+        v_boosting = self.battery_voltage(2)
+        self.set_rc(3, 1600)
+        self.wait_rpm(1, cutin + 300, 9000, timeout=10)
+        v_cut_in = self.battery_voltage(2, duration=1)
+        self.delay_sim_time(40)
+        v_recovered = self.battery_voltage(2)
+        bus, _ = self.battery_samples(6, 5)
+        self.progress(f'AVBAT boosting {v_boosting:.3f} V, at cut-in {v_cut_in:.3f} V, '
+                      f'after 40 s {v_recovered:.3f} V; bus {statistics.mean(bus):.2f} V '
+                      f'(std {statistics.stdev(bus):.3f})')
+        if v_cut_in - v_boosting < 0.12:
+            raise NotAchievedException('AVBAT did not step up when the generator cut in')
+        if v_recovered - v_cut_in < 0.08:
+            raise NotAchievedException('AVBAT did not keep recovering after the cut-in')
+        if statistics.stdev(bus) < 0.15 or not 26.7 < statistics.mean(bus) < 27.4:
+            raise NotAchievedException('No generating ripple on the bus')
+        self.set_rc(3, 1000)
+        self.wait_rpm(1, 1000, cutin - cut_hys - 50, timeout=20)
+        v_dropped_out = self.battery_voltage(2, duration=1)
+        self.progress(f'AVBAT after drop-out {v_dropped_out:.3f} V')
+        if v_recovered - v_dropped_out < 0.12:
+            raise NotAchievedException('AVBAT did not step down when the generator dropped out')
+
+        self.start_subtest('A generator fault keeps AVBAT draining')
+        self.set_rc(3, 1600)
+        self.wait_rpm(1, cutin + 300, 9000, timeout=10)
+        self.set_parameter('SIM_PWR_FAIL', 2)
+        self.delay_sim_time(30)
+        v_start = self.battery_voltage(2)
+        self.delay_sim_time(120)
+        v_end = self.battery_voltage(2)
+        bus, _ = self.battery_samples(6, 5)
+        self.progress(f'AVBAT {v_start:.3f} V to {v_end:.3f} V over 120 s at cruise RPM; '
+                      f'bus std {statistics.stdev(bus):.3f}')
+        if v_start - v_end < 0.06:
+            raise NotAchievedException('AVBAT did not drain with the generator faulted')
+        if statistics.stdev(bus) > 0.12:
+            raise NotAchievedException('Bus ripple with the generator faulted')
+        self.set_parameter('SIM_PWR_FAIL', 0)
+        self.wait_battery_voltage(2, v_end + 0.12, 26, timeout=5)
+        self.set_rc(3, 1000)
+
+        self.start_subtest('Holding AVBAT keeps its charge')
+        self.set_parameter('SIM_PWR_HOLD', 4)
+        self.delay_sim_time(30)
+        v_start = self.battery_voltage(2)
+        self.delay_sim_time(120)
+        v_end = self.battery_voltage(2)
+        self.progress(f'AVBAT held: {v_start:.3f} V to {v_end:.3f} V over 120 s boosting')
+        if abs(v_end - v_start) > 0.03:
+            raise NotAchievedException('AVBAT drained while held')
+        self.set_parameter('SIM_PWR_HOLD', 0)
+
+        self.start_subtest('AVBAT drains faster, from the charge it had')
+        v_before = self.battery_voltage(2)
+        # 50 times: the boost's 6.5 A takes about 1% a second
+        self.set_parameter('SIM_PWR_AVB_DR', 50)
+        v_start = self.battery_voltage(2)
+        self.delay_sim_time(20)
+        v_end = self.battery_voltage(2)
+        self.progress(f'AVBAT draining 50 times faster: {v_before:.3f} V before, {v_start:.3f} V to '
+                      f'{v_end:.3f} V over 20 s boosting')
+        if abs(v_start - v_before) > 0.15:
+            raise NotAchievedException('AVBAT stepped when its drain rate changed')
+        if v_start - v_end < 0.3:
+            raise NotAchievedException('AVBAT did not drain faster')
+        self.set_parameter('SIM_PWR_AVB_DR', 1)
+        self.reset_sim_packs()
+
+        self.start_subtest("Main switch off: the board runs on AVBAT, and the engine can't run")
+        self.set_parameter('SIM_PWR_DISCON', 16)
+        self.delay_sim_time(3)
+        bus, _ = self.battery_samples(6, 3)
+        _, pri_amps = self.battery_samples(7, 3)
+        self.progress(f'Main switch off: bus {statistics.mean(bus):.2f} V, BATT7 {statistics.mean(pri_amps):.2f} A')
+        if not 22.5 < statistics.mean(bus) < 25:
+            raise NotAchievedException("The bus isn't on AVBAT's diode")
+        if statistics.mean(pri_amps) < 2.5:
+            raise NotAchievedException("AVBAT isn't carrying the board")
+        # AVBAT's monitor measures the switched side
+        self.wait_battery_voltage(2, 0, 0.5, timeout=5)
+        # The ECU has no power, so its data stops. RPM1 can't show it: it comes
+        # from the EFI, and ArduPilot keeps the last RPM an unhealthy EFI gave.
+        tstart = self.get_sim_time()
+        while self.assert_receive_message('EFI_STATUS').health:
+            if self.get_sim_time_cached() - tstart > 5:
+                raise NotAchievedException('The EFI still reports with the main switch off')
+        self.delay_sim_time(10)
+        self.run_cmd(mavutil.mavlink.MAV_CMD_DO_ENGINE_CONTROL, p1=0)
+        # Nothing left to power the board: a message says so
+        self.context_push()
+        self.context_collect('STATUSTEXT')
+        self.set_parameter('SIM_PWR_DISCON', 16 | 4 | 8)  # AVBAT and the backup out too
+        self.wait_text('SITL: no avionics power', check_context=True, timeout=5)
+        self.context_pop()
+        self.delay_sim_time(15)
+        held = self.battery_voltage(8, duration=1)
+        self.set_parameter('SIM_PWR_DISCON', 0)
+        self.wait_battery_voltage(6, 27.0, 27.7, timeout=5)
+        # The ECU primes the fuel pump as it powers up, and reports the engine
+        # stopped: it couldn't run, nor be restarted, while the switch was off
+        self.wait_battery_voltage(8, held + 15, held + 60, timeout=5)
+        self.wait_rpm(1, 0, 300, timeout=5)
+        self.start_engine()
+
+        self.start_subtest('A PMU failure drops the bus to the batteries and BATT6 RTLs')
+        self.context_push()
+        self.context_collect('STATUSTEXT')
+        # The engine is already running: warm it and run it up to arm
+        self.set_rc(3, 2000)
+        self.wait_for_engine_temp(idx=1, temp_min=120, temp_max=300, timeout=600)
+        self.wait_for_engine_temp(idx=2, temp_min=120, temp_max=300, timeout=600)
+        self.engine_runup()
+        self.wait_ready_to_arm()
+        self.change_mode('FBWA')
+        self.arm_vehicle()
+        strt_pin = self.get_parameter('SIM_ICE_STRT_PIN')
+        self.set_parameter('SIM_PWR_FAIL', 1)
+        self.wait_battery_voltage(6, 20, 25, timeout=5)
+        t_low = self.get_sim_time()
+        _, bkp_amps = self.battery_samples(6, 2)
+        _, pri_amps = self.battery_samples(7, 2)
+        self.assert_parameter_value('SIM_ICE_STRT_PIN', -1)
+        self.wait_text('Battery 6 is low', timeout=20, check_context=True)
+        t_text = self.get_sim_time() - t_low
+        tstart = self.get_sim_time()
+        while not (self.mode_is('RTL') or self.mode_is('QRTL')):
+            if self.get_sim_time_cached() - tstart > 5:
+                raise NotAchievedException('No RTL after Battery 6 low')
+        self.disarm_vehicle(force=True)
+        self.progress(f'Battery 6 low {t_text:.1f} s after the bus fell; backup {statistics.mean(bkp_amps):.2f} A, '
+                      f'AVBAT {statistics.mean(pri_amps):.2f} A')
+        if not 7 < t_text < 14:
+            raise NotAchievedException('Battery 6 low failsafe not about 10 s after the bus fell')
+        if statistics.mean(bkp_amps) + statistics.mean(pri_amps) < 2.5:
+            raise NotAchievedException("The batteries aren't carrying the board")
+        self.set_parameter('SIM_PWR_FAIL', 0)
+        self.assert_parameter_value('SIM_ICE_STRT_PIN', strt_pin)
+        self.wait_battery_voltage(6, 27.0, 27.7, timeout=5)
+        self.context_pop()
+
+        self.start_subtest('A cold boot on AVBAT alone, then the power-up in order')
+        left_mask = self.get_parameter('BATT4_ESC_MASK')
+        right_mask = self.get_parameter('BATT5_ESC_MASK')
+        held = self.get_parameter('SIM_ICE_FP_NOM') - 38
+        # Everything but AVBAT out, then a reboot (which also clears the
+        # latched battery failsafe)
+        self.set_parameter('SIM_PWR_DISCON', 1 | 2 | 8 | 16)
+        self.reboot_sitl()
+        self.context_set_message_rate_hz(mavutil.mavlink.MAVLINK_MSG_ID_BATTERY_STATUS, 100)
+        self.wait_battery_voltage(6, 22.5, 25, timeout=10)
+        self.wait_battery_voltage(2, 0, 0.5, timeout=5)
+        if self.assert_receive_message('EFI_STATUS', timeout=5).health:
+            raise NotAchievedException('The EFI reports with the main switch off')
+        # ArduPilot still sends the ESCs' telemetry for SITL's RPM, so look
+        # for the packs' voltage rather than the messages
+        try:
+            v = self.esc_pack_voltage(int(left_mask) | int(right_mask))
+        except NotAchievedException:
+            v = 0
+        if v > 1:
+            raise NotAchievedException(f'The ESCs report {v:.1f} V with both packs out')
+        self.set_parameter('SIM_PWR_DISCON', 1 | 2 | 8)  # the main switch on
+        self.wait_battery_voltage(6, 27.0, 27.7, timeout=5)
+        self.wait_battery_voltage(2, 23.8, 25.1, timeout=5)
+        self.wait_battery_voltage(8, held + 15, held + 60, timeout=5)
+        self.set_parameter('SIM_PWR_DISCON', 1 | 8)  # the right pack in
+        self.delay_sim_time(2)
+        v = self.esc_pack_voltage(right_mask)
+        self.progress(f'Right pack in: {v:.2f} V')
+        if not 49.8 < v < 50.6:
+            raise NotAchievedException('The right pack is not reporting full')
+        self.set_parameter('SIM_PWR_DISCON', 8)  # and the left
+        self.delay_sim_time(2)
+        v = self.esc_pack_voltage(left_mask)
+        self.progress(f'Left pack in: {v:.2f} V')
+        if not 49.8 < v < 50.6:
+            raise NotAchievedException('The left pack is not reporting full')
+        self.set_parameter('SIM_PWR_DISCON', 0)  # and the backup
+
+    def VTOLPacks(self):
+        '''Test the simulated VTOL packs (BATT4, BATT5, and BATT1 over them).'''
+        if not self.has_parameter('SIM_VTB_SOC_L'):
+            self.progress('No simulated VTOL packs on this frame; skipping')
+            return
+
+        self.context_set_message_rate_hz(mavutil.mavlink.MAVLINK_MSG_ID_BATTERY_STATUS, 50)
+        # Report raw voltages: setting a pack's charge steps its voltage with no
+        # change of current, which ArduPilot's resistance estimate takes for
+        # resistance, so the compensated voltage reads high afterwards
+        self.set_parameters({'BATT_OPTIONS': 512, 'BATT4_OPTIONS': 0, 'BATT5_OPTIONS': 0})
+        self.reset_sim_packs()
+        left_mask = self.get_parameter('BATT4_ESC_MASK')
+        right_mask = self.get_parameter('BATT5_ESC_MASK')
+
+        self.start_subtest('Packs start full')
+        v4, v5, v1 = self.battery_voltage(4), self.battery_voltage(5), self.battery_voltage(1)
+        self.progress(f'BATT4 {v4:.2f} V, BATT5 {v5:.2f} V, BATT1 {v1:.2f} V')
+        if not (49.8 < v4 < 50.6 and 49.8 < v5 < 50.6):
+            raise NotAchievedException('VTOL packs not full')
+
+        self.start_subtest('One pack at a lower charge: BATT1 follows the lower')
+        self.set_sim_charge('SIM_VTB_SOC_L', 50)
+        v4 = self.wait_battery_voltage(4, 45.5, 46.5, timeout=5)
+        v5, v1 = self.battery_voltage(5), self.battery_voltage(1)
+        self.progress(f'BATT4 {v4:.2f} V, BATT5 {v5:.2f} V, BATT1 {v1:.2f} V')
+        if v5 < 49.8:
+            raise NotAchievedException('The right pack moved with the left')
+        if abs(v1 - v4) > 0.3:
+            raise NotAchievedException('BATT1 does not follow the lower pack')
+
+        self.start_subtest('Reset puts both packs back to full')
+        self.reset_sim_packs()
+        self.wait_battery_voltage(4, 49.8, 50.6, timeout=5)
+
+        self.start_subtest('A draining simulator battery warns to set unlimited fuel')
+        warning = 'Set RealFlight unlimited fuel'
+        self.context_push()
+        self.context_collect('STATUSTEXT')
+        self.assert_no_text(warning, timeout=1, check_context=True)
+        # BATT9 is the physics backend's battery: make it read about 40 V
+        volt_mult = self.get_parameter('BATT9_VOLT_MULT')
+        self.set_parameter('BATT9_VOLT_MULT', volt_mult * 40 / self.battery_voltage(9, duration=1))
+        self.wait_text(warning, timeout=15, check_context=True)
+        t_first = self.get_sim_time()
+        self.context_clear_collection('STATUSTEXT')
+        self.wait_text(warning, timeout=15, check_context=True)
+        interval = self.get_sim_time() - t_first
+        self.progress(f'Warning repeated after {interval:.1f} s')
+        if not 8 < interval < 12:
+            raise NotAchievedException('Warning not repeated about every 10 s')
+        self.context_pop()
+        self.context_push()
+        self.context_collect('STATUSTEXT')
+        self.delay_sim_time(1)
+        self.context_clear_collection('STATUSTEXT')
+        self.assert_no_text(warning, timeout=12, check_context=True)
+        self.context_pop()
+
+        self.start_subtest('A disconnected pack goes quiet')
+        self.context_push()
+        self.context_collect('STATUSTEXT')
+        self.set_parameter('SIM_PWR_DISCON', 1)  # the left pack
+        self.wait_text('CX_BIT: ESC [0-9]+ Telemetry Lost', regex=True, check_context=True, timeout=15)
+        self.context_clear_collection('STATUSTEXT')
+        self.set_parameter('SIM_PWR_DISCON', 0)
+        self.wait_text('CX_BIT: ESC [0-9]+ Telemetry Recovered', regex=True, check_context=True, timeout=15)
+        self.context_pop()
+
+        self.start_subtest('Packs sag in the hover and recover after; a held one keeps its charge')
+        self.set_parameter('SIM_PWR_HOLD', 1)  # the left pack
+        if self.get_parameter('ICE_ENABLE'):
+            self.prepare_engine(rapid_warmup=True)
+        self.wait_ready_to_arm()
+        self.change_mode('QHOVER')
+        self.arm_vehicle()
+        self.set_rc(3, 1800)
+        self.wait_altitude(15, 50, relative=True, timeout=60)
+        self.set_rc(3, 1500)
+        self.delay_sim_time(15)
+        hover_left = self.esc_pack_voltage(left_mask)
+        hover_right = self.esc_pack_voltage(right_mask)
+        _, amps = self.battery_samples(4, 2)
+        self.progress(f'Hover: left {hover_left:.2f} V, right {hover_right:.2f} V, '
+                      f'left pack {statistics.mean(amps):.0f} A')
+        if not (38 < hover_left < 47 and 38 < hover_right < 47):
+            raise NotAchievedException('VTOL packs did not sag in the hover')
+        if not 120 < statistics.mean(amps) < 330:
+            raise NotAchievedException('VTOL pack current far from the aircraft\'s (about 220 A)')
+        self.change_mode('QLAND')
+        self.wait_disarmed(timeout=120)
+        rested = self.esc_pack_voltage(left_mask, duration=1)
+        self.delay_sim_time(60)
+        crept = self.esc_pack_voltage(left_mask)
+        self.progress(f'After landing: left {rested:.2f} V, a minute later {crept:.2f} V')
+        if rested - hover_left < 3:
+            raise NotAchievedException('Left pack did not step up after the motors stopped')
+        if crept - rested < 0.15:
+            raise NotAchievedException('Left pack did not creep up after the motors stopped')
+        right = self.esc_pack_voltage(right_mask)
+        self.progress(f'Rested: left (held) {crept:.2f} V, right {right:.2f} V')
+        if crept - right < 0.4:
+            raise NotAchievedException('The held left pack ran down like the right')
+
+    def FuelPressure(self):
+        '''Test the simulated fuel pressure (BATT8, kPa in the voltage field).'''
+        if not self.has_parameter('SIM_ICE_FP_NOM'):
+            self.progress('No simulated fuel pressure on this frame; skipping')
+            return
+
+        # A stopped engine, from power-up (the pump primes)
+        self.reboot_sitl()
+        self.context_set_message_rate_hz(mavutil.mavlink.MAVLINK_MSG_ID_BATTERY_STATUS, 50)
+        nominal = self.get_parameter('SIM_ICE_FP_NOM')
+        held = nominal - 38
+
+        self.start_subtest('The line holds pressure with the pump off')
+        self.wait_battery_voltage(8, held - 2, held + 3, timeout=60)
+
+        self.start_subtest('Idle: about the nominal pressure')
+        self.start_engine()
+        self.wait_battery_voltage(8, nominal - 3, nominal + 2, timeout=15)
+
+        self.start_subtest('Full throttle: it droops with fuel flow')
+        self.set_rc(3, 2000)
+        self.wait_rpm(1, 6500, 8000, timeout=10)
+        self.wait_battery_voltage(8, nominal - 20, nominal - 8, timeout=10)
+        self.set_rc(3, 1000)
+
+        self.start_subtest('A lower nominal moves the reading only')
+        lowered = nominal - 70
+        self.set_parameter('SIM_ICE_FP_NOM', lowered)
+        self.wait_battery_voltage(8, lowered - 3, lowered + 2, timeout=10)
+        self.set_rc(3, 2000)
+        self.wait_rpm(1, 6500, 8000, timeout=10)
+        self.wait_battery_voltage(8, lowered - 20, lowered - 8, timeout=10)
+        self.set_rc(3, 1000)
+        self.wait_rpm(1, 1000, 4000, timeout=10)
+
+        self.start_subtest('Engine stop: it falls to the held pressure')
+        self.run_cmd(mavutil.mavlink.MAV_CMD_DO_ENGINE_CONTROL, p1=0)
+        self.wait_rpm(1, 0, 300, timeout=30)
+        self.delay_sim_time(2)
+        v = self.battery_voltage(8, duration=1)
+        self.progress(f'2 s after the stop: {v:.2f} kPa')
+        if v > lowered - 15:
+            raise NotAchievedException('Fuel pressure did not drop fast after the stop')
+        self.wait_battery_voltage(8, lowered - 38 - 2, lowered - 38 + 3, timeout=60)
+        self.set_parameter('SIM_ICE_FP_NOM', nominal)
+        self.wait_battery_voltage(8, held - 2, held + 3, timeout=10)
+
+        self.start_subtest('An ECU failure kills the engine and the pump, and stops the EFI')
+        self.start_engine()
+        self.wait_battery_voltage(8, nominal - 3, nominal + 2, timeout=15)
+        self.set_parameter('SIM_ICE_ECU_FAIL', 1)
+        # RPM1 can't show the engine dying: it comes from the EFI, and
+        # ArduPilot keeps the last RPM an unhealthy EFI gave (SW-954)
+        tstart = self.get_sim_time()
+        while self.assert_receive_message('EFI_STATUS').health:
+            if self.get_sim_time_cached() - tstart > 5:
+                raise NotAchievedException('The EFI still reports with the ECU failed')
+        self.wait_battery_voltage(8, held - 2, nominal - 15, timeout=10)
+        self.set_parameter('SIM_ICE_ECU_FAIL', 0)
+        self.wait_rpm(1, 0, 300, timeout=5)
+
+    def FuelLevel(self):
+        '''Test the simulated fuel tank and level sensor (BATT3, kg in the voltage field).
+
+        The level reads through O16's calibration and sloshes with the specific
+        force; a dry tank starves the engine; a leak drains the tank in its
+        time, and the EFI doesn't count it.
+        '''
+        if not self.has_parameter('SIM_ICE_FUEL_KG'):
+            self.progress('No simulated fuel tank on this frame; skipping')
+            return
+
+        # A full tank and a stopped engine
+        self.reboot_sitl()
+        self.context_set_message_rate_hz(mavutil.mavlink.MAVLINK_MSG_ID_BATTERY_STATUS, 50)
+        self.context_set_message_rate_hz(mavutil.mavlink.MAVLINK_MSG_ID_EFI_STATUS, 10)
+        mul = self.get_parameter('SIM_ICE_FL_MUL')
+        ofs = self.get_parameter('SIM_ICE_FL_OFS')
+        nominal = self.get_parameter('SIM_ICE_FP_NOM')
+
+        self.start_subtest('A full tank reads through the calibration')
+        expect = mul * 9.5 + ofs
+        self.wait_battery_voltage(3, expect - 0.15, expect + 0.15, timeout=10)
+
+        self.start_subtest('Changing the load drains the tank at once')
+        self.set_parameter('SIM_ICE_FUEL_KG', 5)
+        expect = mul * 5 + ofs
+        self.wait_battery_voltage(3, expect - 0.15, expect + 0.15, timeout=5)
+
+        self.start_subtest('A reboot starts with the load set')
+        self.reboot_sitl()
+        self.context_set_message_rate_hz(mavutil.mavlink.MAVLINK_MSG_ID_BATTERY_STATUS, 50)
+        self.wait_battery_voltage(3, expect - 0.15, expect + 0.15, timeout=10)
+        # For its first 5 s the fuel follows the tilt at once: SITL's drop
+        # onto the gear at boot would otherwise set it sloshing
+        self.delay_sim_time(5)
+
+        self.start_subtest('A perfect sensor reads the fuel on board')
+        self.set_parameters({'SIM_ICE_FL_MUL': 1, 'SIM_ICE_FL_OFS': 0})
+        self.wait_battery_voltage(3, 4.85, 5.15, timeout=5)
+
+        self.start_subtest('The level sloshes with the specific force, and settles slowly')
+        # An accelerometer bias tilts the specific force without moving the
+        # aircraft: forward, like a nose-up attitude or speeding up
+        rest = self.battery_voltage(3)
+        self.set_parameter('SIM_ACC1_BIAS_X', 1.0)
+        tstart = self.get_sim_time()
+        first = self.battery_voltage(3, duration=1)
+        self.progress(f'At rest {rest:.2f} kg; over the first second {first:.2f} kg')
+        if first - rest > 0.3:
+            raise NotAchievedException('The level jumped with the tilt')
+        # O16's tank: about 15 kg per unit f_x/-f_z with 5 kg on board, so
+        # about 1.5 kg for this bias
+        self.wait_battery_voltage(3, rest + 1.2, rest + 1.8, timeout=60)
+        settled = self.get_sim_time() - tstart
+        self.progress(f'Settled after {settled:.1f} s')
+        if settled < 5:
+            raise NotAchievedException('The level settled too fast')
+        self.set_parameter('SIM_ACC1_BIAS_X', 0)
+        self.wait_battery_voltage(3, rest - 0.15, rest + 0.15, timeout=60)
+
+        self.start_subtest('Running dry: the pressure falls, then the engine quits')
+        self.start_engine()
+        self.wait_battery_voltage(8, nominal - 3, nominal + 2, timeout=15)
+        # Not set_parameter: its wait for the readback would let the engine quit unwatched
+        self.send_set_parameter_direct('SIM_ICE_FUEL_KG', 0)
+        tstart = self.get_sim_time()
+        t_low = None
+        while True:
+            m = self.mav.recv_match(type=['BATTERY_STATUS', 'EFI_STATUS'], blocking=True, timeout=1)
+            now = self.get_sim_time_cached()
+            if now - tstart > 10:
+                raise NotAchievedException('The engine still runs on a dry tank')
+            if m is None:
+                continue
+            if m.get_type() == 'BATTERY_STATUS':
+                if m.id == 7 and t_low is None and self.battery_status_voltage(m) < nominal - 20:
+                    t_low = now
+            elif m.rpm < 1000:
+                break
+        if t_low is None:
+            raise NotAchievedException('The engine quit before the fuel pressure fell')
+        self.progress(f'The engine quit {now - t_low:.2f} s after the pressure fell')
+        if now - t_low > 1.5:
+            raise NotAchievedException('The engine ran on too long without fuel pressure')
+        # An empty tank reads Fuse1's floor
+        self.wait_battery_voltage(3, 0.6, 0.75, timeout=5)
+
+        self.start_subtest('Refueled, the engine starts again')
+        self.run_cmd(mavutil.mavlink.MAV_CMD_DO_ENGINE_CONTROL, p1=0)
+        self.set_parameter('SIM_ICE_FUEL_KG', 9.5)
+        self.start_engine()
+        self.wait_battery_voltage(8, nominal - 3, nominal + 2, timeout=15)
+        self.wait_battery_voltage(3, 9.35, 9.65, timeout=5)
+
+        self.start_subtest("A leak drains the tank in its time, and the EFI doesn't count it")
+        # 9.5 kg over 2 minutes is 4.75 kg a minute; the idle burn adds a few grams
+        used_before = self.assert_receive_message('EFI_STATUS', timeout=2).fuel_consumed
+        self.set_parameter('SIM_ICE_LEAK', 2)
+        tstart = self.get_sim_time()
+        self.delay_sim_time(60)
+        level = self.battery_voltage(3)
+        used = self.assert_receive_message('EFI_STATUS', timeout=2).fuel_consumed - used_before
+        self.progress(f'After a minute of the leak: the sensor reads {level:.2f} kg, '
+                      f'and the EFI has used {used:.0f} g')
+        if abs(level - 4.75) > 0.25:
+            raise NotAchievedException('The tank did not drain at the leak rate')
+        if used > 50:
+            raise NotAchievedException('The EFI counted the leak')
+        self.wait_rpm(1, 0, 1000, timeout=90)
+        quit_after = self.get_sim_time() - tstart
+        self.progress(f'The engine quit {quit_after:.1f} s after the leak started')
+        if not 110 < quit_after < 125:
+            raise NotAchievedException('The leak did not run the tank dry in its time')
+
     def _pretest_hook(self):
         self.install_terrain_handlers_context()
 
@@ -838,6 +1475,10 @@ class AutoTestCarbonix(AutoTestQuadPlane):
             self.EngineIdleManagement,
             self.EngineHourMeter,
             self.FenceTests,
+            self.AvionicsPower,
+            self.VTOLPacks,
+            self.FuelPressure,
+            self.FuelLevel,
         ]
 
     def tests(self) -> list[Any]:
@@ -1119,10 +1760,189 @@ class AutoTestRealFlight(AutoTestCarbonix):
 
         self.end_subtest("Testing prearm checks")
 
+    def PowerModel(self):
+        '''Check the simulated power model against RealFlight's physics.
+
+        The VTOL packs' power follows the thrust RealFlight's physics asks
+        of the motors, and RealFlight supplies the engine RPM that drives
+        the generator, so this checks the packs' current and sag in a VTOL
+        takeoff, the cut-in on transition, the crank and the fuel pressure,
+        and prints the numbers to compare with the aircraft's logs.
+        '''
+        if not (self.has_parameter('SIM_PWR_CUTIN') and self.has_parameter('SIM_VTB_SOC_L')):
+            self.progress('No simulated power model on this frame; skipping')
+            return
+
+        def collect_batteries(duration):
+            '''Return each monitor's voltages and currents over a period, keyed by monitor number.'''
+            self.context_collect('BATTERY_STATUS')
+            self.delay_sim_time(duration)
+            msgs = self.context_collection('BATTERY_STATUS')
+            self.context_stop_collecting('BATTERY_STATUS')
+            out = {}
+            for m in msgs:
+                v, a = out.setdefault(m.id + 1, ([], []))
+                v.append(self.battery_status_voltage(m))
+                a.append(m.current_battery * 0.01)
+            return out
+
+        # Skip the engine warm-up and run-up prearm checks
+        self.set_parameter('BIT_PREARM_DIS', 0b100)
+        self.reboot_sitl()
+        self.context_set_message_rate_hz(mavutil.mavlink.MAVLINK_MSG_ID_BATTERY_STATUS, 100)
+        cutin = self.get_parameter('SIM_PWR_CUTIN')
+        nominal_fp = self.get_parameter('SIM_ICE_FP_NOM')
+        left_mask = self.get_parameter('BATT4_ESC_MASK')
+        right_mask = self.get_parameter('BATT5_ESC_MASK')
+
+        self.start_subtest('Crank: AVBAT sags, and nothing generates while the starter runs')
+        self.set_rc(3, 1000)
+        self.change_mode('QHOVER')
+        self.context_collect('BATTERY_STATUS')
+        self.run_cmd(mavutil.mavlink.MAV_CMD_DO_ENGINE_CONTROL, p1=1)
+        self.delay_sim_time(8)
+        msgs = self.context_collection('BATTERY_STATUS')
+        self.context_stop_collecting('BATTERY_STATUS')
+        avbat = [self.battery_status_voltage(m) for m in msgs if m.id == 1]
+        bus = [self.battery_status_voltage(m) for m in msgs if m.id == 5]
+        steady = [v for v in bus if v > 26.5]
+        spread = self.robust_spread(steady)
+        self.progress(f'AVBAT low {min(avbat):.2f} V; bus low {min(bus):.2f} V, '
+                      f'spread outside the dip {spread:.3f}')
+        if min(avbat) > 19.5:
+            raise NotAchievedException('AVBAT did not sag while cranking')
+        if spread > 0.12:
+            raise NotAchievedException('Generating ripple on the bus while the starter ran')
+        self.wait_rpm(1, 1000, 3500, timeout=20)
+
+        self.start_subtest('Fuel pressure at idle')
+        fp_idle = self.battery_voltage(8, duration=3)
+        self.progress(f'Fuel pressure at idle {fp_idle:.1f} kPa')
+        if abs(fp_idle - nominal_fp) > 5:
+            raise NotAchievedException('Fuel pressure at idle not about nominal')
+
+        self.start_subtest('VTOL takeoff: pack current and sag')
+        # EngineOutScript's route and landing, south and west of home: a route
+        # north and east of AutoTest Hill flew into rising ground
+        self.load_mission("mission.waypoints")
+        self.wait_ready_to_arm(timeout=120)
+        self.change_mode('AUTO')
+        self.arm_vehicle()
+        self.set_rc(3, 1500)
+        self.wait_altitude(10, 1000, relative=True, timeout=60)
+        batts = collect_batteries(4)
+        raw_left = self.esc_pack_voltage(left_mask, duration=1)
+        raw_right = self.esc_pack_voltage(right_mask, duration=1)
+        avbat_takeoff = statistics.mean(batts[2][0])
+        amps_left, amps_right = statistics.mean(batts[4][1]), statistics.mean(batts[5][1])
+        v1, v4, v5 = (statistics.mean(batts[n][0]) for n in (1, 4, 5))
+        self.progress(f'Takeoff climb: left {amps_left:.0f} A {raw_left:.2f} V raw, '
+                      f'right {amps_right:.0f} A {raw_right:.2f} V raw (log: 223 A, 40.6 V); '
+                      f'BATT1 {v1:.2f} V, BATT4 {v4:.2f} V, BATT5 {v5:.2f} V compensated')
+        if not (120 < amps_left < 350 and 120 < amps_right < 350):
+            raise NotAchievedException('VTOL pack current far from the aircraft\'s')
+        if not (36 < raw_left < 48 and 36 < raw_right < 48):
+            raise NotAchievedException('VTOL packs did not sag in the takeoff')
+        # BATT1 against the packs is only printed: under load each monitor
+        # compensates with its own resistance estimate, which hasn't
+        # converged this early. VTOLPacks checks BATT1 at rest.
+
+        self.start_subtest('Transition: the generator cuts in')
+        self.wait_current_waypoint(3, timeout=180)
+        self.delay_sim_time(20)
+        batts = collect_batteries(5)
+        avbat_cruise = statistics.mean(batts[2][0])
+        bus = batts[6][0]
+        fp_cruise = statistics.mean(batts[8][0])
+        rpm = self.assert_receive_message('EFI_STATUS').rpm
+        self.progress(f'Cruise at {rpm:.0f} RPM: AVBAT {avbat_takeoff:.3f} V in the takeoff, '
+                      f'{avbat_cruise:.3f} V now; bus {statistics.mean(bus):.2f} V '
+                      f'(std {statistics.stdev(bus):.3f}); fuel {fp_cruise:.1f} kPa')
+        if avbat_cruise - avbat_takeoff < 0.15:
+            raise NotAchievedException('AVBAT did not step up when the generator cut in')
+        if statistics.stdev(bus) < 0.12:
+            raise NotAchievedException('No generating ripple on the bus in cruise')
+
+        self.start_subtest('A cut-in above cruise RPM drops the generator out in flight')
+        self.set_parameter('SIM_PWR_CUTIN', 9000)
+        self.delay_sim_time(1)
+        batts = collect_batteries(2)
+        avbat_out = statistics.mean(batts[2][0])
+        bus = batts[6][0]
+        self.set_parameter('SIM_PWR_CUTIN', cutin)
+        self.delay_sim_time(1)
+        avbat_back = self.battery_voltage(2, duration=2)
+        self.progress(f'AVBAT {avbat_cruise:.3f} V generating, {avbat_out:.3f} V boosting, '
+                      f'{avbat_back:.3f} V generating again; bus std boosting {statistics.stdev(bus):.3f}')
+        if avbat_cruise - avbat_out < 0.12 or avbat_back - avbat_out < 0.12:
+            raise NotAchievedException('AVBAT did not dip with the generator out')
+        if statistics.stdev(bus) > 0.12:
+            raise NotAchievedException('Bus ripple with the generator out')
+
+        self.start_subtest('VTOL landing and engine stop')
+        self.wait_disarmed(timeout=600)
+        rest_left = self.esc_pack_voltage(left_mask, duration=2)
+        self.progress(f'Left pack at rest after landing {rest_left:.2f} V')
+        self.run_cmd(mavutil.mavlink.MAV_CMD_DO_ENGINE_CONTROL, p1=0)
+        self.wait_rpm(1, 0, 300, timeout=30)
+        self.wait_battery_voltage(8, nominal_fp - 40, nominal_fp - 35, timeout=60)
+
+    def FlatPackHover(self):
+        '''Test that flat VTOL packs can't hold a hover: the packs' sag reaches RealFlight's physics.'''
+        if not self.has_parameter('SIM_VTB_SOC_L'):
+            self.progress('No simulated VTOL packs on this frame; skipping')
+            return
+
+        self.set_parameter('BIT_PREARM_DIS', 0b100)  # skip the engine warm-up and run-up checks
+        self.reboot_sitl()
+        self.context_set_message_rate_hz(mavutil.mavlink.MAVLINK_MSG_ID_BATTERY_STATUS, 50)
+        left_mask = self.get_parameter('BATT4_ESC_MASK')
+
+        self.set_rc(3, 1000)
+        self.change_mode('QHOVER')
+        self.run_cmd(mavutil.mavlink.MAV_CMD_DO_ENGINE_CONTROL, p1=1)
+        self.wait_rpm(1, 1000, 3500, timeout=20)
+        self.wait_ready_to_arm(timeout=120)
+
+        self.start_subtest('Full packs hold the hover')
+        self.change_mode('QLOITER')
+        self.arm_vehicle()
+        self.set_rc(3, 1800)
+        self.wait_altitude(30, 60, relative=True, timeout=60)
+        self.set_rc(3, 1500)
+        self.delay_sim_time(10)
+        alt = self.get_altitude(relative=True)
+        self.progress(f'Hovering at {alt:.1f} m, left pack {self.esc_pack_voltage(left_mask):.2f} V')
+
+        self.start_subtest('Flat packs lose the hover')
+        self.set_sim_charge('SIM_VTB_SOC_L', 0)
+        self.set_sim_charge('SIM_VTB_SOC_R', 0)
+        tstart = self.get_sim_time()
+        while True:
+            now_alt = self.get_altitude(relative=True)
+            volts = self.esc_pack_voltage(left_mask, duration=1)
+            self.progress(f'{self.get_sim_time() - tstart:.0f} s: {now_alt:.1f} m, left pack {volts:.2f} V')
+            if now_alt < alt - 8:
+                break
+            if self.get_sim_time() - tstart > 120:
+                raise NotAchievedException('Held the hover on flat packs')
+
+        self.start_subtest('Fresh packs recover it')
+        # ArduPilot's altitude target followed the aircraft down while the
+        # motors were saturated, so climb back to show the thrust is back
+        self.reset_sim_packs()
+        self.set_rc(3, 1800)
+        self.wait_altitude(alt, alt + 30, relative=True, timeout=60)
+        self.set_rc(3, 1500)
+        self.change_mode('QLAND')
+        self.wait_disarmed(timeout=120)
+
     def _raw_tests(self) -> list[Union[Callable[[], None], Test]]:
         return [
             self.RealFlightHover,
             self.EngineOutScript,
+            self.PowerModel,
+            self.FlatPackHover,
         ]
 
 
