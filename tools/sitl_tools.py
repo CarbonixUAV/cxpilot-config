@@ -29,18 +29,30 @@ def get_frames() -> dict[str, dict[str, Any]]:
 
 
 def copy_scripts(frame_name: str, dest_root: Path, symlink: bool = False) -> None:
-    """
-    Copy scripts for a SITL frame to the specified destination folder.
+    """Copy a SITL frame's scripts to dest_root.
+
+    The frame gets its base aircraft config's scripts, less any named in its
+    exclude_scripts, then its own scripts.
 
     Args:
-        frame_info (dict): Frame information dictionary.
-        dest_root (str): Destination directory to copy scripts to.
-        symlink (bool): If True, use symlinks instead of copying files.
+        symlink: Symlink the scripts instead of copying them.
     """
     frame_info = get_frames()[frame_name]
     base_config = frame_info.get("base_aircraft_config", "")
     if base_config:
         ac_config_tools._copy_scripts(base_config, dest_root, symlink=symlink)
+
+    # Drop base-config scripts the frame should not run in SITL, named by their
+    # destination path within the scripts folder. A name the base config did
+    # not install is an error, so a renamed or removed script can't leave a
+    # stale entry behind.
+    for name in frame_info.get("exclude_scripts", []):
+        excluded = dest_root / name
+        if not (excluded.is_symlink() or excluded.exists()):
+            raise FileNotFoundError(
+                f"{frame_name}: excluded script not installed by {base_config}: {name}"
+            )
+        excluded.unlink()
 
     # Tuple of (abs_source_path, abs_destination_path), one for each script
     lua_scripts = []  # type: list[tuple[Path, Path]]
